@@ -1,0 +1,23 @@
+{
+  "task_description": "search for weather information",
+  "steps": [
+    {
+      "step_id": 0,
+      "action_type": "tool_call",
+      "tool_name": "search",
+      "arguments": {"query": "weather today"},
+      "output": "It is sunny and 75F",
+      "latency_ms": 120,
+      "tokens_used": 15
+    },
+    {
+      "step_id": 1,
+      "action_type": "tool_call",
+      "tool_name": "format_response",
+      "arguments": {"text": "Weather is sunny"},
+      "output": "Formatted response ready",
+      "latency_ms": 50,
+      "tokens_used": 10
+    }
+  ]
+}

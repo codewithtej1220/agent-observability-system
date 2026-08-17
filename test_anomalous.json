@@ -1,0 +1,50 @@
+{
+  "task_description": "agent stuck in loop",
+  "steps": [
+    {
+      "step_id": 0,
+      "action_type": "tool_call",
+      "tool_name": "search",
+      "arguments": {"query": "info"},
+      "output": "No results",
+      "latency_ms": 100,
+      "tokens_used": 10
+    },
+    {
+      "step_id": 1,
+      "action_type": "tool_call",
+      "tool_name": "search",
+      "arguments": {"query": "info"},
+      "output": "No results",
+      "latency_ms": 100,
+      "tokens_used": 10
+    },
+    {
+      "step_id": 2,
+      "action_type": "tool_call",
+      "tool_name": "search",
+      "arguments": {"query": "info"},
+      "output": "No results",
+      "latency_ms": 100,
+      "tokens_used": 10
+    },
+    {
+      "step_id": 3,
+      "action_type": "tool_call",
+      "tool_name": "search",
+      "arguments": {"query": "info"},
+      "output": "No results",
+      "latency_ms": 100,
+      "tokens_used": 10
+    },
+    {
+      "step_id": 4,
+      "action_type": "tool_call",
+      "tool_name": "search",
+      "arguments": {"query": "info"},
+      "output": "No results",
+      "latency_ms": 100,
+      "tokens_used": 10
+    }
+  ]
+}
