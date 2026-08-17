@@ -1,5 +1,11 @@
 # Agent Observability System
 
+![CI/CD](https://github.com/codewithtej1220/agent-observability-system/workflows/CI%2FCD/badge.svg)
+![Python](https://img.shields.io/badge/python-3.8%2B-blue?logo=python&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/postgresql-13%2B-316192?logo=postgresql&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
+![License](https://img.shields.io/badge/license-Private-red)
+
 An AI system for detecting silent failures in LLM agent pipelines using three machine learning paradigms: unsupervised learning, reinforcement learning, and supervised learning working together.
 
 **Status:** Production-ready core functionality with PostgreSQL, authentication, and persistence

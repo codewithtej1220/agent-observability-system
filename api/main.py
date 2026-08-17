@@ -34,7 +34,39 @@ try:
 except ImportError:
     MONITORING_AVAILABLE = False
 
-app = FastAPI(title="Agentic AI Silent-Failure Detector", version="0.1.0")
+# Sentry integration (optional, graceful degradation)
+SENTRY_ENABLED = False
+SENTRY_DSN = os.getenv("SENTRY_DSN")
+if SENTRY_DSN:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
+        
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            environment=os.getenv("ENVIRONMENT", "development"),
+            traces_sample_rate=0.1,  # 10% of transactions for performance monitoring
+            profiles_sample_rate=0.1,  # 10% for profiling
+            integrations=[
+                FastApiIntegration(),
+                SqlalchemyIntegration(),
+            ],
+            # Set release version
+            release=f"agent-observability@1.0.0",
+            # Send PII (set to False in production if needed)
+            send_default_pii=False,
+        )
+        SENTRY_ENABLED = True
+        print("✅ Sentry error monitoring enabled")
+    except ImportError:
+        print("⚠️  Sentry SDK not installed. Run: pip install sentry-sdk")
+    except Exception as e:
+        print(f"⚠️  Sentry initialization failed: {e}")
+else:
+    print("ℹ️  Sentry disabled (no SENTRY_DSN in environment)")
+
+app = FastAPI(title="Agentic AI Silent-Failure Detector", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -292,3 +324,17 @@ async def metrics(request: Request, _rate: None = Depends(check_rate_limit)):
             "# Monitoring module not available\n"
             "# Install: pip install prometheus-client\n"
         )
+
+
+@app.get("/sentry-debug")
+async def sentry_debug():
+    """Test endpoint to trigger Sentry error (development only)."""
+    if os.getenv("ENVIRONMENT") == "production":
+        raise HTTPException(status_code=403, detail="Debug endpoint disabled in production")
+    
+    if not SENTRY_ENABLED:
+        return {"status": "Sentry not enabled", "message": "Set SENTRY_DSN in .env to enable"}
+    
+    # Trigger a test error
+    division_by_zero = 1 / 0
+    return {"status": "This should never be reached"}
