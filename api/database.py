@@ -21,13 +21,21 @@ if not DATABASE_URL:
     )
 
 # Create engine
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,  # Check connection health
-    pool_size=10,  # Connection pool
-    max_overflow=20,
-    echo=False  # Set to True for SQL debugging
-)
+# SQLite doesn't support pool_size and max_overflow, so only use them for PostgreSQL
+if DATABASE_URL.startswith("postgresql"):
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,  # Check connection health
+        pool_size=10,  # Connection pool
+        max_overflow=20,
+        echo=False  # Set to True for SQL debugging
+    )
+else:
+    # SQLite (for testing)
+    engine = create_engine(
+        DATABASE_URL,
+        echo=False  # Set to True for SQL debugging
+    )
 
 # Session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

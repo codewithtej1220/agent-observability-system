@@ -8,10 +8,57 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-# Set test environment variables
+# Set test environment variables - use file-based SQLite for thread safety
 os.environ["ENVIRONMENT"] = "testing"
-os.environ["DATABASE_URL"] = "sqlite:///:memory:"  # Use in-memory DB for tests
+os.environ["DATABASE_URL"] = "sqlite:///./test_database.db?check_same_thread=false"
 os.environ["SECRET_KEY"] = "test-secret-key-do-not-use-in-production"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def setup_test_database():
+    """Create test database tables before all tests."""
+    from api.database import init_db, drop_all
+    
+    # Drop any existing tables
+    try:
+        drop_all()
+    except:
+        pass
+    
+    # Create fresh tables
+    init_db()
+    
+    yield
+    
+    # Cleanup after all tests
+    try:
+        drop_all()
+    except:
+        pass
+    
+    # Remove test database file
+    test_db_path = Path("test_database.db")
+    if test_db_path.exists():
+        test_db_path.unlink()
+
+
+@pytest.fixture(scope="function", autouse=True)
+def clean_database():
+    """Clean database between tests."""
+    from api.database import SessionLocal, TraceRecord, FeedbackRecord
+    
+    yield
+    
+    # Clean up data after each test
+    db = SessionLocal()
+    try:
+        db.query(TraceRecord).delete()
+        db.query(FeedbackRecord).delete()
+        db.commit()
+    except:
+        db.rollback()
+    finally:
+        db.close()
 
 
 @pytest.fixture(scope="session")
@@ -82,12 +129,16 @@ def invalid_api_key():
 
 @pytest.fixture(autouse=True)
 def reset_rate_limiter():
-    """Reset rate limiter between tests."""
-    # This prevents rate limit carryover between tests
-    from api.rate_limiter import RateLimiter
+    """Reset rate limiter state before each test."""
+    # Import here to avoid circular imports
+    from api.main import rate_limiter
+    
+    # Clear the rate limiter buckets before each test
+    rate_limiter.buckets.clear()
+    rate_limiter.request_counts.clear()
     
     yield
     
-    # Reset rate limiter state after each test
-    # Note: This is a simple approach; in production you might want
-    # to use a more sophisticated rate limiter with configurable backend
+    # Clear again after test
+    rate_limiter.buckets.clear()
+    rate_limiter.request_counts.clear()

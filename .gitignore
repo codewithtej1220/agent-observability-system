@@ -67,6 +67,7 @@ data/real_cache/*.json
 .pytest_cache/
 .coverage
 htmlcov/
+test_database.db
 
 # Alembic
 alembic/versions/*.pyc
