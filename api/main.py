@@ -7,6 +7,17 @@ Run with:
 """
 from __future__ import annotations
 
+# Load environment variables FIRST, before any os.getenv() calls
+from dotenv import load_dotenv
+load_dotenv()
+
+# Python 3.10+ compatibility fix for collections.MutableMapping
+import collections
+import collections.abc
+for typename in ['Mapping', 'MutableMapping', 'Iterable', 'Iterator', 'Callable']:
+    if not hasattr(collections, typename):
+        setattr(collections, typename, getattr(collections.abc, typename))
+
 import os
 import pickle
 from typing import Any, Dict, List, Optional
