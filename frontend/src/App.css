@@ -1,6 +1,38 @@
+:root {
+  --void: #05070c;
+  --carbon: #0d121b;
+  --carbon-raised: #131a26;
+  --line: rgba(255,255,255,0.07);
+  --papaya: #ff7a1a;
+  --signal: #5b8cff;
+  --mint: #2ee6a6;
+}
+
 .app {
   min-height: 100vh;
-  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  background: var(--void);
+  background-image:
+    radial-gradient(1200px 600px at 15% -10%, rgba(91,140,255,0.06), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(255,122,26,0.05), transparent 55%);
+  background-attachment: fixed;
+  position: relative;
+}
+
+/* Subtle scanline effect for cyberpunk feel */
+.app::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 999;
+  background: repeating-linear-gradient(
+    to bottom, 
+    rgba(255,255,255,0.012) 0px, 
+    rgba(255,255,255,0.012) 1px,
+    transparent 1px, 
+    transparent 3px
+  );
+  mix-blend-mode: overlay;
 }
 
 /* Header */

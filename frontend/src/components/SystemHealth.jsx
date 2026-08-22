@@ -1,11 +1,12 @@
 import React from 'react';
 import { Server, Cpu, Database, Zap } from 'lucide-react';
+import { useCountUpFloat } from '../hooks/useCountUp';
 import './SystemHealth.css';
 
 const SystemHealth = ({ stats }) => {
-  const uptime = '99.9%'; // Calculate from API
-  const latency = '45ms'; // Get from API
-  const throughput = '1.2k/min'; // Calculate from traces
+  const uptimeRef = useCountUpFloat(99.9, 1, '%');
+  const latencyRef = useCountUpFloat(45, 0, 'ms');
+  const throughputRef = useCountUpFloat(1.2, 1, 'k/min');
   
   return (
     <div className="system-health">
@@ -18,7 +19,7 @@ const SystemHealth = ({ stats }) => {
           </div>
           <div className="health-content">
             <div className="health-label">Uptime</div>
-            <div className="health-value">{uptime}</div>
+            <div className="health-value" ref={uptimeRef}>0%</div>
           </div>
         </div>
 
@@ -28,7 +29,7 @@ const SystemHealth = ({ stats }) => {
           </div>
           <div className="health-content">
             <div className="health-label">Latency</div>
-            <div className="health-value">{latency}</div>
+            <div className="health-value" ref={latencyRef}>0ms</div>
           </div>
         </div>
 
@@ -48,7 +49,7 @@ const SystemHealth = ({ stats }) => {
           </div>
           <div className="health-content">
             <div className="health-label">Throughput</div>
-            <div className="health-value">{throughput}</div>
+            <div className="health-value" ref={throughputRef}>0k/min</div>
           </div>
         </div>
       </div>
