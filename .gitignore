@@ -23,6 +23,9 @@ backend/artifacts/
 *.db-shm
 *.sqlite3
 
+# Large data cache files (>100MB)
+data/real_cache/*.json
+
 # Node
 node_modules/
 frontend/dist/
