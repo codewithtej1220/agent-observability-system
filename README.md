@@ -1,566 +1,209 @@
-# Agent Observability System
+# Agent Observability
 
-![CI/CD](https://github.com/codewithtej1220/agent-observability-system/workflows/CI%2FCD/badge.svg)
-![Python](https://img.shields.io/badge/python-3.8%2B-blue?logo=python&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/postgresql-13%2B-316192?logo=postgresql&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
-![License](https://img.shields.io/badge/license-Private-red)
+Detects silent failures in LLM agents **while they happen** — infinite loops, tool thrashing,
+hallucinated tool calls and token waste — and recommends an intervention (reflect, retry,
+escalate, ask a human, or stop) that is learned from real outcomes.
 
-An AI system for detecting silent failures in LLM agent pipelines using three machine learning paradigms: unsupervised learning, reinforcement learning, and supervised learning working together.
+Traditional monitoring sees a 200 OK and normal latency. This system looks at the *behavior*
+of each run, step by step.
 
-**Status:** Production-ready core functionality with PostgreSQL, authentication, and persistence
+```mermaid
+flowchart LR
+    A[Agent step<br/>via SDK] --> F[Behavioral<br/>features]
+    F --> R[Rule detectors]
+    F --> U[Unsupervised<br/>IsolationForest + k-NN<br/>HDBSCAN]
+    F --> S[Supervised<br/>gradient boosting<br/>on run prefixes]
+    R -. stacked .-> S
+    U -. stacked .-> S
+    R --> X[Fusion +<br/>open-set gate]
+    U --> X
+    S --> X
+    X --> K[Risk, failure type,<br/>evidence]
+    K --> P[LinUCB policy<br/>+ guardrails]
+    P --> I[Intervention<br/>returned to agent]
+    K --> D[Dashboard]
+    D --> H[Human review]
+    H -- outcome = reward --> P
+    H -- label --> S
+```
 
----
+## How it works
 
-## Problem Statement
+Every agent step (tool call, reasoning step, or final answer) is sent to the API. After each
+step the run is re-scored by three learning paradigms that cover each other's blind spots:
 
-AI agents fail silently in ways traditional monitoring cannot detect:
-- Infinite loops with repeated tool calls
-- Tool thrashing between operations without progress
-- Hallucinated operations on non-existent tools
-- Token consumption without meaningful output
+| Layer | Method | Why it is there |
+|---|---|---|
+| **Rules** | Deterministic detectors for identical-call streaks, tool cycles, near-duplicate rephrasing, switching-without-progress, unregistered tools, spend-without-progress | Exact, explainable evidence pointing at specific steps. Unregistered-tool calls set a hard risk floor. |
+| **Unsupervised** | IsolationForest + k-NN distance, calibrated to percentiles of normal traffic; HDBSCAN behavioral archetypes; PCA behavior map | Needs no labels; flags behavior unlike anything normal, including failure modes nobody has named yet. |
+| **Supervised** | Gradient-boosted trees over behavioral features + rule outputs + novelty (stacked), trained on **run prefixes** | Names the failure type and recognizes it 1–2 steps after onset. Retrains from human labels. |
+| **Fusion** | Logistic regression fit on validation data, plus an **open-set gate** (rule ≥ r AND novelty ≥ n) | Learned signal weights; the gate keeps detecting failure types the classifier never saw. |
+| **Policy (RL)** | LinUCB contextual bandit with guardrails, warm-started offline, updated on every review | Learns which intervention works for which failure profile. State is persisted after every update. |
 
-This system detects these behavioral anomalies and recommends intervention strategies.
+Human review closes both loops: the **outcome** rewards the policy immediately, and the **label**
+retrains the classifier (manually or automatically every N labels). New model versions are
+promoted only if they are not worse on the held-out set. The review queue is ordered by
+classifier uncertainty (active learning), so each label is as informative as possible.
 
----
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design rationale and data model.
 
-## Solution Architecture
+## Results (simulated reference data)
 
-Three learning paradigms operating in concert:
+Measured on 1,500 held-out simulated runs (≈25% failing) that were never used for training.
+The simulator deliberately includes healthy behavior that looks like failure (pagination,
+polling a job until it finishes, retry after a transient error, productive A↔B alternation).
+**Expect lower numbers on real traffic** — the review queue and retraining are how the models
+adapt to it.
 
-1. **Unsupervised Learning** (IsolationForest + HDBSCAN)
-   - Detects anomalies without requiring labeled data
-   - Identifies outliers in high-dimensional trace embeddings
+| | Precision | Recall | False-positive rate | Caught ≤ 2 steps after onset | Avoidable tokens flagged |
+|---|---|---|---|---|---|
+| Fused engine (v1) | 97.3% | 98.1% | 0.9% | 89% | 70% of failing-run tokens |
 
-2. **Reinforcement Learning** (LinUCB Contextual Bandit)
-   - Learns optimal intervention actions based on context
-   - Policy persists across system restarts
-   - Continuously adapts from feedback
+**Each paradigm alone vs fused** (recall at 5% FPR): rules 0%, unsupervised 56%, supervised 100%, fused 100%.
 
-3. **Supervised Learning** (Feedback Loop)
-   - Improves system accuracy from real-world outcomes
-   - Updates policy based on human-provided labels
+**The case that matters in production — a failure type never seen in training** (leave-one-type-out):
 
----
+| Held-out type | Rules only | Unsupervised only | Supervised only | **Fused** |
+|---|---|---|---|---|
+| Loop | 83% @ 24% FPR | 99% @ 30% FPR | 17% @ 0% FPR | **59% @ 1.3% FPR** |
+| Tool thrashing | 45% @ 24% | 99% @ 30% | 82% @ 0.1% | **84% @ 1.7%** |
+| Hallucinated tool | 100% @ 24% | 59% @ 28% | 37% @ 0% | **100% @ 1.1%** |
+| Token waste | 68% @ 24% | 96% @ 30% | 89% @ 0% | **89% @ 1.0%** |
 
-## Technical Stack
+A supervised model alone confidently calls unfamiliar failures "healthy"; rules and novelty
+alone flag a quarter of healthy runs. Combined, they keep false positives near 1% while
+recovering most of the lost recall.
 
-### Backend
-- **Framework:** FastAPI with async support
-- **Database:** PostgreSQL (Supabase) with SQLAlchemy ORM
-- **Authentication:** API Key + JWT token support
-- **Rate Limiting:** Token bucket algorithm (100 req/min)
-- **ML Models:** scikit-learn, HDBSCAN, custom LinUCB implementation
+**Intervention policy** (average reward over 4,000 simulated decisions; oracle = upper bound
+that knows the true failure): LinUCB **0.58**, hand-written playbook 0.41, always page a human
+0.37, random 0.35, oracle 0.65.
 
-### Frontend
-- **Framework:** React with hooks
-- **Visualization:** Recharts for real-time metrics
-- **UI:** Modern responsive design with auto-refresh
+All of these numbers are regenerated by `python -m scripts.bootstrap` and shown on the
+dashboard's **Detection models** and **Intervention policy** pages.
 
-### Infrastructure
-- **Configuration:** Environment-based with python-dotenv
-- **Deployment:** Docker + Kubernetes manifests included
-- **CI/CD:** GitHub Actions workflow configured
+## Quick start
 
----
-
-## Quick Start
-
-### Prerequisites
-- Python 3.8+
-- Node.js 14+ (for frontend)
-- PostgreSQL database (Supabase recommended)
-
-### Installation
+Requirements: Python 3.10+, Node 18+.
 
 ```bash
-# Clone repository
-git clone <repository-url>
-cd agent-observability-system
+cd backend
+pip install -r requirements-dev.txt
+python -m scripts.bootstrap          # trains models, seeds 7 days of demo traffic (~2.5 min)
+uvicorn app.main:app --port 8000
+```
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: .\venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure environment
-cp .env.example .env
-# Edit .env with your DATABASE_URL and SECRET_KEY
-
-# Train models on real data
-python scripts/train_pipeline.py
-
-# Start API server
-uvicorn api.main:app --reload --port 8001
-
-# Start frontend (new terminal)
+```bash
 cd frontend
 npm install
-npm start
+npm run dev                          # http://localhost:5173
 ```
 
-### Access Points
-- **API:** http://localhost:8001
-- **Dashboard:** http://localhost:3000
-- **API Docs:** http://localhost:8001/docs
-
----
-
-## Training Data
-
-System is trained on 1,200+ real agent execution traces from verified HuggingFace datasets:
-- **facebook/xlsum** - Summarization task traces
-- **lmsys/chatbot_arena_conversations** - Production chatbot interactions
-- **HuggingFaceH4/ultrachat_200k** - High-quality dialogue traces
-- **HuggingFaceH4/no_robots** - Human-written conversation patterns
-- **lmsys/toxic-chat** - Failure mode examples
-
-**Evaluation:** Proper stratified train/validation/test splits (64%/16%/20%) with metrics reported on held-out test set.
-
----
-
-## API Reference
-
-### Authentication
-All protected endpoints require API key authentication:
+Stream live traffic into the running system (an agent loop that obeys the interventions):
 
 ```bash
-curl -H "X-API-Key: dev-key-12345" \
-     -H "Content-Type: application/json" \
-     -X POST http://localhost:8001/ingest_trace \
-     -d @trace.json
+python sdk/examples/live_traffic.py --runs 30
 ```
 
-**Default API Keys:**
-- Development: `dev-key-12345` (admin role, 1000 req/min)
-- Production: `prod-key-67890` (user role, 100 req/min)
+Or run everything with Docker (PostgreSQL + API + dashboard on http://localhost:8080):
 
-### Endpoints
-
-#### POST /ingest_trace
-Submit agent execution traces for analysis.
-
-**Request:**
-```json
-{
-  "task_description": "Search weather and summarize",
-  "steps": [
-    {
-      "step_id": 0,
-      "action_type": "search",
-      "tool_name": "weather_api",
-      "arguments": {"location": "Seattle"},
-      "output": "Temp: 65F, Sunny",
-      "latency_ms": 120,
-      "tokens_used": 50
-    }
-  ]
-}
-```
-
-**Response:**
-```json
-{
-  "trace_id": "abc-123",
-  "isolation_score": 0.42,
-  "is_cluster_outlier": false,
-  "combined_score": 0.35,
-  "is_anomalous": false,
-  "recommended_action": "continue",
-  "context_summary": [0.1, 0.2, 0.3, 0.4, 0.5]
-}
-```
-
-#### POST /feedback
-Provide outcome feedback for reinforcement learning.
-
-**Request:**
-```json
-{
-  "context_summary": [0.1, 0.2, 0.3, 0.4, 0.5],
-  "action": "continue",
-  "reward": 1.0
-}
-```
-
-#### GET /traces
-Retrieve recent trace records (requires authentication).
-
-**Parameters:**
-- `limit` (optional): Maximum number of traces (default: 50)
-
-#### GET /stats
-System statistics (public, rate-limited).
-
-**Response:**
-```json
-{
-  "total_traces": 1523,
-  "anomalous_traces": 287,
-  "avg_combined_score": 0.34
-}
-```
-
-#### GET /health
-Health check endpoint (public, rate-limited).
-
----
-
-## Database Schema
-
-### traces table
-```sql
-CREATE TABLE traces (
-    id SERIAL PRIMARY KEY,
-    trace_id VARCHAR UNIQUE NOT NULL,
-    task_description VARCHAR NOT NULL,
-    trace_json JSONB NOT NULL,
-    isolation_score FLOAT,
-    is_cluster_outlier BOOLEAN,
-    combined_score FLOAT,
-    is_anomalous BOOLEAN,
-    policy_action VARCHAR,
-    context_summary JSONB,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE
-);
-```
-
-**Indexes:**
-- `trace_id` (unique)
-- `combined_score`
-- `is_anomalous`
-- `created_at`
-
----
-
-## Security Features
-
-### Implemented
-- **API Key Authentication:** Required for protected endpoints
-- **Rate Limiting:** Token bucket algorithm with configurable limits
-- **Input Validation:** Pydantic models with strict type checking
-- **CORS Configuration:** Controlled cross-origin access
-- **Environment Variables:** Secrets stored in `.env` (gitignored)
-- **SQL Injection Protection:** SQLAlchemy ORM with parameterized queries
-
-### Architecture Considerations
-- JWT token support implemented but not activated
-- Role-based access control (RBAC) framework included
-- Connection pooling configured (10 base + 20 overflow)
-- Password hashing with bcrypt for future user management
-
----
-
-## Machine Learning Pipeline
-
-### Feature Engineering
-Traces are converted to feature vectors capturing:
-- Tool diversity (unique tools / total steps)
-- Repetition patterns (max consecutive identical tools)
-- Error frequency (failed operations)
-- Latency statistics (mean, std, max)
-- Token consumption patterns
-
-### Model Training
 ```bash
-# Train with cross-validation and held-out test set
-python scripts/train_pipeline.py
+docker compose up --build
 ```
 
-**Process:**
-1. Load real agent traces from HuggingFace
-2. Extract features and create embeddings
-3. Train IsolationForest for anomaly detection
-4. Train HDBSCAN for clustering
-5. Initialize LinUCB bandit for action selection
-6. Evaluate on held-out test set
-7. Save models to `artifacts/`
+## Instrumenting your agent
 
-### Model Persistence
-- **Embedder:** `artifacts/embedder.pkl`
-- **Detector:** `artifacts/detector.pkl`
-- **RL Policy:** `artifacts/bandit_state.npz` (auto-saved every 10 feedback updates)
+The SDK (`sdk/agent_observability`) has no dependencies. Register the agent's tools once so
+hallucinated tool calls are detected exactly, then stream steps:
 
----
+```python
+from agent_observability import ObservabilityClient
 
-## Deployment
+client = ObservabilityClient("http://127.0.0.1:8000", api_key="dev-local-key")
+client.register_agent("support-bot", tools=["search_kb", "get_order", "send_reply"], model="gpt-4o-mini")
 
-### Local Development
-```bash
-uvicorn api.main:app --reload --port 8001
+with client.run("support-bot", task=user_message) as run:
+    for _ in range(MAX_STEPS):
+        tool, args = llm.decide(messages)
+        result = tools[tool](**args)
+        verdict = run.tool_call(tool, args, output=result,
+                                input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
+        if verdict and verdict.should_stop:          # terminate / human_review
+            break
+        if verdict and verdict.action == "reflect":
+            messages.append(REFLECTION_PROMPT)       # e.g. "You are repeating the same call..."
+    run.final_answer(answer)
+
+# Later, once the outcome is known (closes the learning loop):
+client.feedback(run.run_id, label="healthy", resolved=True)
 ```
 
-### Docker
-```bash
-docker-compose up -d
-```
+The client fails open: if the service is unreachable, the agent keeps running.
 
-### Kubernetes
-```bash
-kubectl apply -f k8s-deployment.yml
-```
+## API
 
-### Environment Variables
-Required in `.env`:
-```bash
-DATABASE_URL=postgresql://user:pass@host:5432/db
-SECRET_KEY=your-secret-key-here
-ENVIRONMENT=production
-```
+Interactive docs at `http://127.0.0.1:8000/docs`. All `/api` routes require `X-API-Key`.
 
-Optional:
-```bash
-SENTRY_DSN=your-sentry-dsn  # Get from https://sentry.io
-ARTIFACTS_DIR=artifacts
-```
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/ingest/runs/start` | Open a live run |
+| POST | `/api/ingest/runs/{id}/steps` | Append a step; returns risk, failure type, evidence, recommended action |
+| POST | `/api/ingest/runs/{id}/finish` | Close a live run |
+| POST | `/api/ingest/runs`, `/api/ingest/runs/batch` | Ingest completed runs (post-hoc) |
+| POST | `/api/runs/{id}/feedback` | Report the true condition and outcome → policy reward + training label |
+| POST | `/api/agents` | Register an agent and its tools |
+| GET | `/api/overview`, `/api/runs`, `/api/runs/{id}` | Dashboard data |
+| GET | `/api/agents`, `/api/agents/{id}`, `/api/agents/compare` | Per-agent stats, tool-flow graph, comparison |
+| GET | `/api/review-queue` | Flagged runs awaiting review (sorted by uncertainty) |
+| GET | `/api/models`, `/api/models/{v}/metrics`, `/api/behavior-map` | Model registry and evaluation |
+| POST | `/api/models/retrain` | Retrain with collected labels (background) |
+| GET | `/api/policy` | Policy state, learning curves, live rewards |
 
----
+## Dashboard
 
-## Error Monitoring (Sentry)
+- **Overview** — run volume by severity, token spend vs avoidable spend, failure mix, interventions, per-agent health, recent alerts.
+- **Runs / Run detail** — risk after every step, tokens per step, rule evidence, class probabilities, the policy's per-action scores, the full step trace, and the review form.
+- **Agents / Agent detail / Compare** — reliability and cost per agent, a tool-flow graph of how runs move between tools (loops and hallucinated tools stand out), side-by-side comparison.
+- **Review queue** — active-learning queue and retrain controls.
+- **Detection models** — pipeline flowchart, version history, paradigm comparison, unseen-failure study, PR curves, confusion matrix, early-detection histogram, feature importance, behavior map.
+- **Intervention policy** — warm-start learning curves vs baselines, what the policy learned per failure, live reward, learned weights.
 
-Sentry error monitoring is fully integrated and ready to use.
-
-### Features
-- **Automatic error capture** - All Python exceptions tracked
-- **Performance monitoring** - API endpoint latency and database queries
-- **Stack traces** - Full context for debugging
-- **Release tracking** - Errors tagged with version `agent-observability@1.0.0`
-- **Environment tagging** - Separate development/staging/production errors
-- **Graceful degradation** - System works fine without Sentry
-
-### Quick Setup
-
-1. **Create free Sentry account:** https://sentry.io/signup/
-2. **Create Python/FastAPI project** in Sentry dashboard
-3. **Copy your DSN** (looks like `https://abc123@o123.ingest.sentry.io/456`)
-4. **Add to `.env` file:**
-   ```bash
-   SENTRY_DSN=https://your-dsn-here@o123.ingest.sentry.io/456
-   ```
-5. **Restart API** - You'll see: `✅ Sentry error monitoring enabled`
-6. **Test error capture:**
-   ```bash
-   curl http://localhost:8001/sentry-debug
-   ```
-
-### What Gets Captured
-- All unhandled exceptions
-- API endpoint errors (4xx, 5xx)
-- Database query errors
-- FastAPI middleware errors
-- Stack traces with full context
-- Request details (headers, body, params)
-- Server environment info
-
-### Verification
-After setup, check your Sentry dashboard at https://sentry.io to see captured errors.
-
-**Free tier includes:**
-- 5,000 errors/month
-- 10,000 performance units/month
-- 7-day data retention
-
-**See:** [SENTRY_SETUP_INSTRUCTIONS.md](SENTRY_SETUP_INSTRUCTIONS.md) for detailed setup guide.
-
----
-
-## Testing
-
-### Unit Tests
-```bash
-pytest tests/test_models.py
-```
-
-### Integration Tests
-```bash
-python test_complete_system.py
-```
-
-### Load Testing
-```bash
-python tests/load_test.py
-```
-
-### Manual API Testing
-```bash
-# Test authentication
-curl http://localhost:8001/ingest_trace -X POST -d '{}'
-# Expected: 401 Unauthorized
-
-# Test with valid key
-curl -H "X-API-Key: dev-key-12345" \
-     -X POST http://localhost:8001/ingest_trace \
-     -d '{"task_description":"test","steps":[]}'
-# Expected: 200 OK with scores
-
-# Test rate limiting
-for i in {1..105}; do 
-  curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8001/health
-done | grep 429
-# Expected: Some 429 responses
-```
-
----
-
-## Performance Metrics
-
-**Anomaly Detection (Test Set):**
-- Recall: ~75-85% (pathological trace detection)
-- Precision: ~70-80% (flagged trace accuracy)
-- F1 Score: ~72-82%
-
-**API Performance:**
-- Ingestion latency: <100ms (p95)
-- Concurrent requests: 100+ simultaneous users
-- Rate limit: 100 requests/minute per endpoint
-
-**Database:**
-- Connection pool: 10 base connections + 20 overflow
-- Query performance: <5ms for recent traces
-- Multi-instance ready (PostgreSQL)
-
----
-
-## Project Structure
+## Project layout
 
 ```
-agent-observability-system/
-├── api/                      # FastAPI backend
-│   ├── main.py              # API server with endpoints
-│   ├── database.py          # PostgreSQL + SQLAlchemy
-│   ├── auth.py              # Authentication & RBAC
-│   ├── rate_limiter.py      # Rate limiting implementation
-│   └── monitoring.py        # Prometheus metrics
-├── agent_harness/           # Trace schemas and harness
-├── anomaly_model/           # ML models (IsolationForest, HDBSCAN)
-├── embedding_pipeline/      # Feature extraction
-├── rl_policy/              # Reinforcement learning (LinUCB)
-├── data/                   # Data loaders and generators
-├── frontend/               # React dashboard
-│   └── src/
-│       ├── App.jsx         # Main dashboard component
-│       └── App.css         # Styling
-├── scripts/                # Training and utilities
-│   └── train_pipeline.py   # Model training pipeline
-├── tests/                  # Test suite
-├── artifacts/              # Trained models (gitignored)
-├── .github/workflows/      # CI/CD configuration
-├── requirements.txt        # Python dependencies
-└── README.md              # This file
+backend/
+  ml/            schema, features, rule detectors, models, fusion engine, LinUCB policy, simulator, training/eval
+  app/           FastAPI app: config, DB tables, ingestion, analytics, model registry, retraining
+  scripts/       bootstrap (train + warm start + seed demo history)
+  tests/         26 tests: features, detectors, policy, engine quality, API
+frontend/        React + Vite + Recharts dashboard
+sdk/             zero-dependency Python client + live traffic example
+docs/            architecture notes
 ```
 
----
+## Configuration
 
-## Development Roadmap
+Environment variables (or `backend/.env`, see `backend/.env.example`):
 
-### Completed (Weeks 1-2)
-- [x] Real data training pipeline (1200+ traces)
-- [x] Proper train/validation/test splits
-- [x] API authentication enforcement
-- [x] Rate limiting implementation
-- [x] RL policy persistence
-- [x] PostgreSQL migration with SQLAlchemy
-- [x] Environment-based configuration
-- [x] React dashboard with real-time updates
+| Variable | Default | |
+|---|---|---|
+| `AOBS_DATABASE_URL` | SQLite in `backend/data/` | e.g. `postgresql://user:pass@host/db` |
+| `AOBS_API_KEYS` | `dev-local-key` | Comma-separated; **change before exposing the API** |
+| `AOBS_CORS_ORIGINS` | `http://localhost:5173,...` | Dashboard origins |
+| `AOBS_AUTO_RETRAIN_EVERY` | `50` | Retrain after N new labels (0 = manual) |
 
-### Completed (Week 3)
-- [x] GitHub repository setup with CI/CD
-- [x] Sentry error monitoring integration
-- [x] Documentation cleanup (76 files to 4 core docs)
-- [x] README badges and status indicators
+The dashboard reads `VITE_API_KEY` (see `frontend/.env.example`).
 
-### Completed (Week 4)
-- [x] Comprehensive test suite (40 tests, 99% pass rate)
-- [x] Test coverage reporting (57% overall, 93%+ critical paths)
-- [x] Rate limiter testing fixes
-- [x] Database testing with proper isolation
+Estimated costs use the price table in `backend/app/pricing.py`; update it to your rates.
 
----
+## Limitations and next steps
 
-## Contributing
-
-This is a private repository. For questions or collaboration inquiries, please contact the repository owner.
-
----
-
-## Documentation
-
-### Core Documentation
-- **[SETUP_GUIDE.md](SETUP_GUIDE.md)** - Complete installation and configuration guide
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Technical system design and architecture
-- **[CHANGELOG.md](CHANGELOG.md)** - Version history and updates
-- **[SENTRY_SETUP_INSTRUCTIONS.md](SENTRY_SETUP_INSTRUCTIONS.md)** - Error monitoring setup guide
-- **[TESTING_GUIDE.md](TESTING_GUIDE.md)** - Test suite documentation
-- **[WEEK4_FINAL_SUMMARY.md](WEEK4_FINAL_SUMMARY.md)** - Week 4 testing achievements
-
-### Legacy Documentation (Archived)
-- **[WEEK1_FIXES_IMPLEMENTED.md](WEEK1_FIXES_IMPLEMENTED.md)** - Real data and security improvements
-- **[WEEK2_POSTGRESQL_MIGRATION.md](WEEK2_POSTGRESQL_MIGRATION.md)** - Database migration details
-- **[PROJECT_FLAWS_AND_LIMITATIONS.md](PROJECT_FLAWS_AND_LIMITATIONS.md)** - Honest assessment
-
----
-
-## Production Readiness
-
-**Current Score: 9.7/10**
-
-**Strengths:**
-- Production-grade PostgreSQL database
-- Proper authentication and rate limiting
-- Real data training with honest evaluation (1,200+ traces)
-- Persistent reinforcement learning
-- Environment-based configuration
-- Comprehensive documentation
-- **Sentry error monitoring fully integrated**
-- **99% test pass rate with 40+ tests**
-- **57% code coverage (93%+ on critical paths)**
-- CI/CD pipeline configured
-
-**Considerations:**
-- Load testing recommended before high-traffic deployment
-- Monitoring stack (Grafana) configuration pending
-- Kubernetes deployment requires testing
-
-**Suitable for:**
-- Production deployments (with proper Sentry DSN)
-- MVP deployments
-- Single to moderate-scale applications
-- Development and staging environments
-- Portfolio demonstrations
-
----
-
-## License
-
-Private repository. All rights reserved.
-
----
-
-## Technical Notes
-
-**Design Decisions:**
-- PostgreSQL chosen over SQLite for horizontal scaling capability
-- SQLAlchemy ORM for database abstraction and type safety
-- Token bucket rate limiting for gradual capacity management
-- Persistent RL policy for continuous learning across restarts
-- Environment variables for configuration management
-
-**Performance Considerations:**
-- Connection pooling prevents database bottlenecks
-- Feature extraction optimized with numpy vectorization
-- Model artifacts cached in memory after initial load
-- Frontend implements debouncing for API calls
-
-**Security Considerations:**
-- API keys stored in environment, not code
-- SQL injection prevented through ORM
-- Rate limiting prevents resource exhaustion
-- CORS configured for controlled access
-- Input validation with Pydantic models
-
----
-
-**Production Deployment:** System ready for deployment with proper environment configuration. See deployment documentation for platform-specific instructions.
+- Reference metrics come from a simulator. Run on real traffic, label through the review
+  queue, and watch the version history on the Detection models page.
+- The policy's offline warm start uses an assumed outcome model (`ml/simulator.py`,
+  `SUCCESS_PROB`). Live rewards from reviews override it over time.
+- Novelty is measured lexically (word bigrams). Swapping in sentence embeddings would catch
+  paraphrased repetition better, at the cost of a model dependency.
+- Analytics aggregate in Python over a time window; at high volume, move them to SQL views or a
+  time-series store.
+- Adapters for agent frameworks (LangChain/LangGraph callbacks, OpenTelemetry GenAI spans)
+  would map their events onto the same step schema.

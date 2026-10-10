@@ -1,78 +1,37 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+venv/
+.venv/
+env/
 
-# Environment variables (IMPORTANT - NEVER COMMIT!)
+# Environment
 .env
 .env.local
 .env.*.local
 
-# Database
+# Runtime data and trained models (regenerate with `python -m scripts.bootstrap`)
+backend/data/
+backend/artifacts/
+/artifacts/
 *.db
-*.sqlite
+*.db-wal
+*.db-shm
 *.sqlite3
-traces.db
 
-# IDE
+# Node
+node_modules/
+frontend/dist/
+npm-debug.log*
+
+# Editors / OS
 .vscode/
 .idea/
 *.swp
-*.swo
-*~
-
-# OS
 .DS_Store
 Thumbs.db
-
-# Logs
 *.log
-
-# Node (for frontend)
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-package-lock.json
-
-# Model artifacts (LARGE FILES - Don't push to GitHub!)
-artifacts/*.pkl
-artifacts/*.npz
-
-# Data cache (LARGE FILES - Don't push to GitHub!)
-data/real_cache/*.json
-!data/real_cache/.gitkeep
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-test_database.db
-
-# Alembic
-alembic/versions/*.pyc
-
-# Unnecessary files
-dashboard.html
-traces.db
-*.db-journal
