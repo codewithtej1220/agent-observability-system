@@ -4,11 +4,18 @@ const BASE = import.meta.env.VITE_API_BASE || "";
 const KEY = import.meta.env.VITE_API_KEY || "dev-local-key";
 
 export async function api(path, { method = "GET", body } = {}) {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: { "X-API-Key": KEY, ...(body ? { "Content-Type": "application/json" } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const url = `${BASE}${path}`;
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: { "X-API-Key": KEY, ...(body ? { "Content-Type": "application/json" } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    // Network-level failure: server down/restarting, wrong host, or blocked by CORS.
+    throw new Error(`Cannot reach the API at ${BASE || window.location.origin}${path.split("?")[0]}`);
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try {
