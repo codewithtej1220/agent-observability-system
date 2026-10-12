@@ -41,10 +41,10 @@ def reference_data() -> Tuple[List[Run], List[Run], List[Run]]:
 def human_labeled_runs(db: Session) -> List[Tuple[Run, str, int]]:
     """Latest human label per run, as (run, label, feedback_id)."""
     out: Dict[str, Tuple[Run, str, int]] = {}
-    agents = {a.id: a for a in db.query(Agent).all()}
+    agents = {(a.workspace_id, a.id): a for a in db.query(Agent).all()}
     rows = db.query(Feedback, RunRecord).join(RunRecord, Feedback.run_id == RunRecord.id).order_by(Feedback.id).all()
     for fb, rec in rows:
-        out[rec.id] = (to_ml_run(rec, agents.get(rec.agent_id)), fb.label, fb.id)
+        out[rec.id] = (to_ml_run(rec, agents.get((rec.workspace_id, rec.agent_id))), fb.label, fb.id)
     return list(out.values())
 
 

@@ -37,7 +37,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 
 def init_db() -> None:
-    from . import orm  # noqa: F401  (register tables)
+    from . import orm, orm_llm  # noqa: F401  (register tables)
 
     Base.metadata.create_all(engine)
 

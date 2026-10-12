@@ -3,8 +3,6 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-ARG VITE_API_KEY=dev-local-key
-ENV VITE_API_KEY=$VITE_API_KEY
 RUN npm run build
 
 FROM nginx:1.27-alpine

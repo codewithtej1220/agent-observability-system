@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Agent Observability: Chat Monitor",
+  "version": "1.0.0",
+  "description": "Sends your finished Gemini, ChatGPT and Claude web chats to your Agent Observability dashboard for checking, and shows the result next to each answer.",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1:8000/*", "http://localhost:8000/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://gemini.google.com/*", "https://chatgpt.com/*", "https://claude.ai/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": { "default_title": "Chat Monitor", "default_popup": "popup.html" },
+  "options_page": "options.html"
+}

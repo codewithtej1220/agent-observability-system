@@ -11,7 +11,8 @@ Steps:
   4. Replay N days of agent traffic through the real ingestion path, with a
      simulated incident, and simulated reviewer feedback day by day (so the
      policy keeps learning online, as it would in production).
-  5. Retrain (v2) with the human labels collected in step 4.
+  5. Seed simulated LLM gateway traffic (demo contracts, alerts, drift test).
+  6. Retrain (v2) with the human labels collected in step 4.
 
 Simulated traffic carries its ground-truth label in `source_label`; the
 models never see it. Point real agents at the API (see sdk/) to replace it.
@@ -34,7 +35,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import get_settings  # noqa: E402
 from app.db import Base, SessionLocal, engine, init_db  # noqa: E402
-from app.orm import Agent, RunRecord, utcnow  # noqa: E402
+from app.auth import DEMO_WORKSPACE_NAME, demo_workspace  # noqa: E402
+from app.orm import DEFAULT_WORKSPACE_SETTINGS, Agent, RunRecord, Workspace, utcnow  # noqa: E402
 from app.schemas import FeedbackIn, RunIn, StepIn  # noqa: E402
 from app.services import ingest, training  # noqa: E402
 from app.services.registry import registry  # noqa: E402
@@ -55,9 +57,18 @@ def run_to_payload(run: Run, started_at) -> RunIn:
     )
 
 
-def register_agents(db) -> None:
+def ensure_demo_workspace(db) -> int:
+    ws = demo_workspace(db)
+    if ws is None:
+        ws = Workspace(name=DEMO_WORKSPACE_NAME, settings=dict(DEFAULT_WORKSPACE_SETTINGS))
+        db.add(ws)
+        db.commit()
+    return ws.id
+
+
+def register_agents(db, ws_id: int) -> None:
     for a in AGENTS:
-        row = db.get(Agent, a.agent_id) or Agent(id=a.agent_id)
+        row = db.get(Agent, (ws_id, a.agent_id)) or Agent(workspace_id=ws_id, id=a.agent_id)
         row.name, row.description, row.model, row.framework = a.name, a.description, a.model, a.framework
         row.registered_tools = a.tool_names
         db.add(row)
@@ -70,7 +81,7 @@ def hourly_volume(hour: int, base: float) -> int:
     return int(np.random.poisson(base * shape))
 
 
-def seed_history(db, days: int, runs_per_hour: float, feedback_share: float, seed: int) -> None:
+def seed_history(db, ws_id: int, days: int, runs_per_hour: float, feedback_share: float, seed: int) -> None:
     rng = random.Random(seed)
     np.random.seed(seed)
     outcome_rng = np.random.default_rng(seed)
@@ -101,7 +112,7 @@ def seed_history(db, days: int, runs_per_hour: float, feedback_share: float, see
             continue
         day_payloads.sort(key=lambda p: p.started_at)
         for i in range(0, len(day_payloads), 250):
-            ingest.ingest_runs(db, day_payloads[i:i + 250])
+            ingest.ingest_runs(db, ws_id, day_payloads[i:i + 250])
         total_runs += len(day_payloads)
 
         # Reviewers label a share of that day's flagged runs (and a few unflagged ones).
@@ -116,7 +127,7 @@ def seed_history(db, days: int, runs_per_hour: float, feedback_share: float, see
             label = rec.source_label or "healthy"
             action = rec.recommended_action
             resolved = simulate_outcome(outcome_rng, label, action)
-            ingest.record_feedback(db, rec.id, FeedbackIn(label=label, action_taken=action, resolved=resolved,
+            ingest.record_feedback(db, ws_id, rec.id, FeedbackIn(label=label, action_taken=action, resolved=resolved,
                                                           reviewer="simulated-reviewer"))
             total_feedback += 1
         log.info("Day %d/%d: %d runs ingested, %d feedback so far", day + 1, days + 1, len(day_payloads), total_feedback)
@@ -146,7 +157,8 @@ def main() -> None:
         if training.active_version(db) is not None and not args.reset:
             log.error("A model already exists. Use --reset to rebuild from scratch.")
             sys.exit(1)
-        register_agents(db)
+        ws_id = ensure_demo_workspace(db)
+        register_agents(db, ws_id)
         log.info("Training v1 on simulated reference data (robustness study: %s)...", not args.skip_robustness)
         mv = training.train_new_version(db, "bootstrap", robustness=not args.skip_robustness)
         log.info("v1: macro-F1 %.3f, fused PR-AUC %.3f", mv.macro_f1, mv.pr_auc)
@@ -154,13 +166,18 @@ def main() -> None:
         log.info("Policy warm start: %s", report.get("final_avg_reward"))
 
         if not args.no_history:
-            seed_history(db, args.days, args.runs_per_hour, args.feedback_share, args.seed)
+            seed_history(db, ws_id, args.days, args.runs_per_hour, args.feedback_share, args.seed)
+            from app.llm.demo import seed_demo_llm
+
+            n_llm = seed_demo_llm(db, ws_id, days=args.days)
+            log.info("Seeded %d simulated LLM calls (tagged 'demo') with contracts, alerts and a drift test", n_llm)
             log.info("Retraining with human labels...")
             mv2 = training.train_new_version(db, "bootstrap: human labels")
             log.info("%s: macro-F1 %.3f (active=%s)", mv2.version, mv2.macro_f1, mv2.active)
     finally:
         db.close()
     log.info("Done in %.0fs. Start the API: uvicorn app.main:app --port 8000", time.time() - t0)
+    log.info("The first account you sign up with becomes admin of '%s'.", DEMO_WORKSPACE_NAME)
 
 
 if __name__ == "__main__":

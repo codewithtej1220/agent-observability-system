@@ -103,3 +103,52 @@ review submitted ──► reward ──► policy.update()  (immediate, persist
 - Lexical novelty misses paraphrased repetition; sentence embeddings would help.
 - The single-process API holds the models in memory. For horizontal scaling, load the active
   version per worker and move policy updates to a single writer (or a shared store).
+
+## LLM monitoring
+
+### Request path
+
+```
+app (official SDK, base_url → gateway, api_key = workspace key)
+   │
+   ▼
+/gateway/{provider}/...   authenticate workspace key → decrypt stored provider key
+   │                      strip X-AOBS-* headers, forward body unchanged
+   ├── monitor mode ──► provider ──► response streamed straight back to the app
+   │                                   └─ after the stream ends: reassemble text + usage,
+   │                                      evaluate, store, fire event alerts
+   └── block / repair ─► provider ──► buffer response ─► evaluate
+                              ▲                            │ critical violation?
+                              │ repair turn / fallback ◄───┘ yes (repair mode)
+                              │                            │ no → release response
+                              └── exhausted ──► HTTP 422 aobs_policy_violation
+```
+
+Provider adapters (`app/llm/providers.py`) only *read* the wire formats (OpenAI chat
+completions and Responses API, Anthropic Messages, Gemini generateContent, each streaming
+and non-streaming). They write requests only to build repair turns and fallback calls.
+
+### Evaluation
+
+For each call: built-in checks (errors, empty, truncated, PII in output, prompt injection
+in input, refusal) + the contract's deterministic rules + judge rules in one batched judge
+call. Severity is the worst failed check; adherence is the share of contract and judge
+rules passed. With the workspace's *auto-judge* setting, calls without a contract are judged
+against their own system prompt (sampled, for cost).
+
+### Security model
+
+- Passwords: argon2id. Sessions: random 256-bit token in an httpOnly, SameSite=Lax cookie;
+  only its SHA-256 is stored, so sessions are revocable and a database leak does not expose them.
+- CSRF: state-changing requests with a session must carry `X-Requested-With: aobs`.
+- API keys (`aobs_…`): stored as SHA-256; shown once; revocable.
+- Provider keys: Fernet-encrypted (AES-128-CBC + HMAC-SHA256) with `AOBS_SECRET_KEY`;
+  decrypted only in memory to forward a request; the API returns only a 4-character hint.
+- Google sign-in: server-side authorization-code flow with a state cookie; accounts are
+  linked by verified email.
+- Tenancy: workspace-owned rows carry `workspace_id` (steps and feedback through their run) and
+  every query filters on it; cross-workspace lookups return 404. The agent-failure models and
+  intervention policy are shared across workspaces and learn from all reviews. Roles: viewer (read), member (configure, ingest), admin (members, keys, settings).
+- Alert webhooks: http(s) only; in production https and no private/loopback targets (SSRF guard).
+- Privacy: per-workspace switches to not store content, mask PII before storage, and a
+  retention period after which stored text is erased (metrics are kept).

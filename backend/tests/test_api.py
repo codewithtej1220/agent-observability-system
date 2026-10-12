@@ -12,7 +12,7 @@ def test_health_is_public(client):
 
 def test_auth_required(client):
     assert client.get("/api/overview", headers={"X-API-Key": ""}).status_code == 401
-    assert client.get("/api/overview", headers={"X-API-Key": "wrong"}).status_code == 403
+    assert client.get("/api/overview", headers={"X-API-Key": "wrong"}).status_code == 401
 
 
 def test_ingest_full_run_and_detail(client, make_run):

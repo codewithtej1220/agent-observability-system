@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -12,8 +13,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .db import SessionLocal, init_db
+from . import crypto
 from .routes import router
-from .security import warn_if_insecure
+from .llm import upstream, worker
+from .llm.gateway import router as gateway_router
+from .routes_account import router as account_router
+from .routes_llm import router as llm_router
 from .services.registry import registry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -22,13 +27,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
-    warn_if_insecure()
+    crypto.check_ready()
     db = SessionLocal()
     try:
         registry.load(db)
     finally:
         db.close()
+    task = asyncio.create_task(worker.run_forever()) if settings.background_jobs else None
     yield
+    if task is not None:
+        task.cancel()
+    await upstream.close()
     registry.save_policy()
 
 
@@ -43,10 +52,14 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
-    allow_methods=["GET", "POST"],
-    allow_headers=["X-API-Key", "Content-Type"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=["X-API-Key", "Content-Type", "X-Requested-With", "Authorization"],
 )
+app.include_router(account_router)
 app.include_router(router)
+app.include_router(llm_router)
+app.include_router(gateway_router)
 
 
 @app.get("/health", tags=["system"])

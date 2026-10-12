@@ -21,8 +21,13 @@ services:
     build: ./backend
     environment:
       AOBS_DATABASE_URL: postgresql://aobs:aobs@postgres:5432/aobs
-      AOBS_API_KEYS: ${AOBS_API_KEYS:-dev-local-key}
+      AOBS_SECRET_KEY: ${AOBS_SECRET_KEY:?Set AOBS_SECRET_KEY (encrypts stored provider keys)}
+      AOBS_DEV_API_KEY: ""  # disable the development-only demo key
       AOBS_CORS_ORIGINS: http://localhost:8080
+      AOBS_PUBLIC_URL: ${AOBS_PUBLIC_URL:-http://localhost:8080}
+      AOBS_API_PUBLIC_URL: ${AOBS_API_PUBLIC_URL:-http://localhost:8080}
+      AOBS_GOOGLE_CLIENT_ID: ${AOBS_GOOGLE_CLIENT_ID:-}
+      AOBS_GOOGLE_CLIENT_SECRET: ${AOBS_GOOGLE_CLIENT_SECRET:-}
       AOBS_SEED_DEMO: ${AOBS_SEED_DEMO:-1}
     volumes:
       - artifacts:/app/artifacts
@@ -33,10 +38,7 @@ services:
         condition: service_healthy
 
   frontend:
-    build:
-      context: ./frontend
-      args:
-        VITE_API_KEY: ${AOBS_API_KEYS:-dev-local-key}
+    build: ./frontend
     ports:
       - "8080:80"
     depends_on:

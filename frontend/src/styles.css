@@ -179,3 +179,44 @@ label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px
 .signal.sev-mid { border-left-color: var(--warning); }
 pre.output { white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 120px; overflow: auto; font-size: 12px; color: var(--text-2); }
 .pill-step { display: inline-block; min-width: 22px; text-align: center; border-radius: 4px; background: var(--surface-2); padding: 0 4px; font-size: 12px; }
+
+/* Auth */
+.auth-shell { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px 16px; background: var(--page); }
+.auth-card { width: 100%; max-width: 400px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 28px; }
+.auth-card input { width: 100%; }
+.google-btn { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; text-decoration: none; color: var(--text); }
+.google-btn:hover { background: var(--surface-2); text-decoration: none; }
+.btn { display: inline-flex; align-items: center; justify-content: center; }
+.divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; margin: 16px 0; }
+.divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
+
+/* Sidebar groups and account */
+.nav-group { padding: 14px 20px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #7d828a; }
+.sidebar { display: flex; flex-direction: column; overflow-y: auto; }
+.sidebar-foot { position: static; margin-top: auto; padding: 14px 20px 0; border-top: 1px solid rgba(255,255,255,0.08); }
+.sidebar-foot select { width: 100%; background: rgba(255,255,255,0.06); color: #e6e8eb; border-color: rgba(255,255,255,0.15); margin: 6px 0; }
+.sidebar-foot .link-btn { color: #c9ccd1; }
+.link-btn { background: none; border: none; padding: 0; min-height: 0; color: var(--accent); cursor: pointer; font: inherit; }
+.link-btn:hover { background: none; text-decoration: underline; }
+
+/* Tabs */
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 16px; flex-wrap: wrap; }
+.tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 12px; color: var(--text-2); }
+.tabs button.on { border-bottom-color: var(--accent); color: var(--text); font-weight: 600; }
+.tabs button:hover { background: var(--surface-2); }
+
+/* Code */
+pre.code { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; overflow-x: auto; margin: 0; font-size: 12.5px; line-height: 1.5; }
+.code-wrap { position: relative; }
+.code-wrap .copy { position: absolute; top: 6px; right: 6px; min-height: 26px; padding: 2px 8px; font-size: 12px; }
+.secret { font-family: ui-monospace, Consolas, monospace; background: var(--warning-soft); border: 1px solid var(--warning); border-radius: 6px; padding: 10px 12px; word-break: break-all; }
+.textblock { white-space: pre-wrap; word-break: break-word; background: var(--surface-2); border-radius: 6px; padding: 10px 12px; font-size: 13px; max-height: 360px; overflow: auto; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.form-grid .wide { grid-column: 1 / -1; }
+input[type="number"], input[type="email"], input[type="password"], input[type="url"] {
+  font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 9px; min-height: 32px;
+}
+.check-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.rule-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--surface-2); }
+.badge.info { background: var(--accent-soft); color: var(--accent); }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); display: inline-block; }

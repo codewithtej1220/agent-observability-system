@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Chat Monitor settings</title>
+  <style>
+    :root { color-scheme: light dark; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    body { max-width: 560px; margin: 32px auto; padding: 0 16px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    p.sub { color: GrayText; margin: 0 0 20px; }
+    label { display: block; margin: 14px 0 4px; font-weight: 600; font-size: 13px; }
+    input[type=text], input[type=password], input[type=url] { width: 100%; box-sizing: border-box; padding: 7px 9px; font: inherit; border: 1px solid #8886; border-radius: 6px; }
+    .hint { color: GrayText; font-size: 12.5px; margin-top: 3px; }
+    .check { display: flex; gap: 8px; align-items: center; font-weight: 400; margin: 8px 0; }
+    fieldset { border: 1px solid #8884; border-radius: 8px; margin: 18px 0; padding: 4px 14px 10px; }
+    legend { font-weight: 600; font-size: 13px; padding: 0 4px; }
+    button { font: inherit; padding: 7px 14px; border-radius: 6px; border: 1px solid #8886; cursor: pointer; margin-right: 8px; }
+    button.primary { background: #2a78d6; border-color: #2a78d6; color: #fff; }
+    #status { margin-top: 12px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Chat Monitor</h1>
+  <p class="sub">Sends finished Gemini, ChatGPT and Claude chats from this browser to your Agent Observability dashboard.</p>
+
+  <label for="apiUrl">API URL</label>
+  <input id="apiUrl" type="url" placeholder="http://127.0.0.1:8000" />
+  <div class="hint">Where your Agent Observability API runs.</div>
+
+  <label for="apiKey">Workspace API key</label>
+  <input id="apiKey" type="password" placeholder="aobs_..." autocomplete="off" />
+  <div class="hint">Dashboard → Settings → API keys. Stored only in this browser (not synced).</div>
+
+  <label for="project">Contract (optional)</label>
+  <input id="project" type="text" placeholder="e.g. demo-support" />
+  <div class="hint">Slug of a prompt contract whose rules should apply. Built-in checks (personal data, prompt injection, refusals) always run.</div>
+
+  <fieldset>
+    <legend>Sites</legend>
+    <label class="check"><input type="checkbox" data-site="gemini-web" /> gemini.google.com</label>
+    <label class="check"><input type="checkbox" data-site="chatgpt-web" /> chatgpt.com</label>
+    <label class="check"><input type="checkbox" data-site="claude-web" /> claude.ai <span class="hint">(not yet verified against the live site)</span></label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Behaviour</legend>
+    <label class="check"><input type="checkbox" id="onlyNew" /> Only send messages written after a chat is opened (skip existing history)</label>
+    <label class="check"><input type="checkbox" id="showBadges" /> Show the check result under each answer</label>
+  </fieldset>
+
+  <button class="primary" id="save">Save</button>
+  <button id="test">Test connection</button>
+  <div id="status"></div>
+  <script src="options.js"></script>
+</body>
+</html>

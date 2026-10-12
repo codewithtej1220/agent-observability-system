@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    :root { color-scheme: light dark; font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    body { width: 300px; margin: 0; padding: 12px 14px; }
+    h1 { font-size: 14px; margin: 0 0 8px; }
+    .row { display: flex; justify-content: space-between; align-items: center; margin: 4px 0; }
+    .muted { color: GrayText; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+    ul { list-style: none; padding: 0; margin: 8px 0; }
+    li { padding: 5px 0; border-top: 1px solid #8883; }
+    a { color: inherit; }
+    button { font: inherit; padding: 5px 10px; border-radius: 6px; border: 1px solid #8886; cursor: pointer; }
+    .err { color: #d03b3b; margin: 6px 0; }
+  </style>
+</head>
+<body>
+  <h1>Chat Monitor</h1>
+  <div class="row"><span id="state"></span><button id="pause"></button></div>
+  <div class="row muted"><span id="counts"></span></div>
+  <div id="error" class="err"></div>
+  <ul id="recent"></ul>
+  <div class="row"><a href="#" id="options">Settings</a><a href="#" id="dashboard">Open dashboard</a></div>
+  <script src="popup.js"></script>
+</body>
+</html>

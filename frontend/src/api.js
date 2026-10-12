@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+// Same-origin by default: the dev server and nginx proxy /api to the backend.
 const BASE = import.meta.env.VITE_API_BASE || "";
-const KEY = import.meta.env.VITE_API_KEY || "dev-local-key";
+
+export class ApiError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
 
 export async function api(path, { method = "GET", body } = {}) {
   const url = `${BASE}${path}`;
@@ -9,20 +16,26 @@ export async function api(path, { method = "GET", body } = {}) {
   try {
     res = await fetch(url, {
       method,
-      headers: { "X-API-Key": KEY, ...(body ? { "Content-Type": "application/json" } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
+      credentials: "include",
+      headers: { "X-Requested-With": "aobs", ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch {
     // Network-level failure: server down/restarting, wrong host, or blocked by CORS.
-    throw new Error(`Cannot reach the API at ${BASE || window.location.origin}${path.split("?")[0]}`);
+    throw new ApiError(0, `Cannot reach the API at ${BASE || window.location.origin}${path.split("?")[0]}`);
   }
   if (!res.ok) {
     let detail = res.statusText;
     try {
       const j = await res.json();
-      detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+      if (typeof j.detail === "string") detail = j.detail;
+      else if (Array.isArray(j.detail)) {
+        // FastAPI validation errors: "email: value is not a valid email address: …"
+        detail = j.detail.map((e) => `${(e.loc || []).filter((p) => p !== "body").join(".")}: ${e.msg}`).join("; ");
+      } else detail = j.error?.message || detail;
     } catch { /* not JSON */ }
-    throw new Error(`${res.status}: ${detail}`);
+    if (res.status === 401) window.dispatchEvent(new Event("aobs:unauthorized"));
+    throw new ApiError(res.status, detail);
   }
   return res.json();
 }
@@ -44,7 +57,8 @@ export function useApi(path, { refreshMs = 0 } = {}) {
   }, [path]);
 
   useEffect(() => {
-    setState((s) => ({ ...s, loading: true }));
+    // A different request: drop the previous result so it is never shown under new filters.
+    setState({ data: null, error: null, loading: true });
     load();
     if (!refreshMs) return undefined;
     const id = setInterval(load, refreshMs);

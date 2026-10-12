@@ -56,13 +56,13 @@ def _bucket_of(ts: datetime, size: timedelta) -> datetime:
     return datetime.fromtimestamp(math.floor(ts.timestamp() / secs) * secs)
 
 
-def _run_rows(db: Session, since: datetime, agent_id: Optional[str] = None):
+def _run_rows(db: Session, ws: int, since: datetime, agent_id: Optional[str] = None):
     q = db.query(
         RunRecord.id, RunRecord.agent_id, RunRecord.started_at, RunRecord.severity, RunRecord.failure_type,
         RunRecord.input_tokens, RunRecord.output_tokens, RunRecord.cost_usd, RunRecord.avoidable_tokens,
         RunRecord.recommended_action, RunRecord.risk_score, RunRecord.status, RunRecord.n_steps,
         RunRecord.total_latency_ms, RunRecord.has_final_answer, RunRecord.first_flag_step,
-    ).filter(RunRecord.started_at >= since)
+    ).filter(RunRecord.workspace_id == ws, RunRecord.started_at >= since)
     if agent_id:
         q = q.filter(RunRecord.agent_id == agent_id)
     return q.all()
@@ -93,11 +93,11 @@ def _kpis(rows) -> Dict:
     }
 
 
-def overview(db: Session, hours: int) -> Dict:
+def overview(db: Session, ws: int, hours: int) -> Dict:
     now = utcnow()
     since = now - timedelta(hours=hours)
-    rows = _run_rows(db, since)
-    prev = _run_rows(db, since - timedelta(hours=hours))
+    rows = _run_rows(db, ws, since)
+    prev = _run_rows(db, ws, since - timedelta(hours=hours))
     prev = [r for r in prev if r.started_at < since]
 
     size = _bucket_size(hours)
@@ -114,7 +114,7 @@ def overview(db: Session, hours: int) -> Dict:
     failure_counts = Counter(r.failure_type for r in rows if r.severity in FLAGGED and r.failure_type)
     action_counts = Counter(r.recommended_action for r in rows if r.severity in FLAGGED)
 
-    agents = {a.id: a for a in db.query(Agent).all()}
+    agents = {a.id: a for a in db.query(Agent).filter(Agent.workspace_id == ws).all()}
     by_agent: Dict[str, list] = defaultdict(list)
     for r in rows:
         by_agent[r.agent_id].append(r)
@@ -123,10 +123,11 @@ def overview(db: Session, hours: int) -> Dict:
         key=lambda d: d["flagged_rate"], reverse=True,
     )
 
-    recent = (db.query(RunRecord).filter(RunRecord.severity.in_(FLAGGED))
+    recent = (db.query(RunRecord).filter(RunRecord.workspace_id == ws, RunRecord.severity.in_(FLAGGED))
               .order_by(RunRecord.started_at.desc()).limit(8).all())
     pending_review = (db.query(func.count(RunRecord.id))
-                      .filter(RunRecord.severity.in_(FLAGGED), ~RunRecord.feedback.any()).scalar())
+                      .filter(RunRecord.workspace_id == ws, RunRecord.severity.in_(FLAGGED),
+                              ~RunRecord.feedback.any()).scalar())
     return {
         "hours": hours,
         "kpis": _kpis(rows),
@@ -164,9 +165,9 @@ def run_summary(r: RunRecord) -> Dict:
     }
 
 
-def list_runs(db: Session, *, agent_id=None, severity=None, failure_type=None, status=None, q=None,
+def list_runs(db: Session, ws: int, *, agent_id=None, severity=None, failure_type=None, status=None, q=None,
               hours: Optional[int] = None, sort: str = "recent", limit: int = 50, offset: int = 0) -> Dict:
-    query = db.query(RunRecord)
+    query = db.query(RunRecord).filter(RunRecord.workspace_id == ws)
     if agent_id:
         query = query.filter(RunRecord.agent_id == agent_id)
     if severity == "flagged":
@@ -193,12 +194,12 @@ def list_runs(db: Session, *, agent_id=None, severity=None, failure_type=None, s
     return {"total": total, "items": [run_summary(r) for r in rows]}
 
 
-def run_detail(db: Session, run_id: str) -> Optional[Dict]:
+def run_detail(db: Session, ws: int, run_id: str) -> Optional[Dict]:
     r = (db.query(RunRecord).options(selectinload(RunRecord.steps), selectinload(RunRecord.feedback))
-         .filter(RunRecord.id == run_id).first())
+         .filter(RunRecord.id == run_id, RunRecord.workspace_id == ws).first())
     if r is None:
         return None
-    agent = db.get(Agent, r.agent_id)
+    agent = db.get(Agent, (ws, r.agent_id))
     baseline = None
     if registry.engine and r.agent_id in registry.engine.baselines:
         baseline = registry.engine.baselines[r.agent_id].to_dict()
@@ -264,20 +265,20 @@ def _agent_stats(rows) -> Dict:
     }
 
 
-def agents_summary(db: Session, hours: int) -> List[Dict]:
-    rows = _run_rows(db, _window(hours))
+def agents_summary(db: Session, ws: int, hours: int) -> List[Dict]:
+    rows = _run_rows(db, ws, _window(hours))
     by_agent: Dict[str, list] = defaultdict(list)
     for r in rows:
         by_agent[r.agent_id].append(r)
     out = []
-    for a in db.query(Agent).order_by(Agent.name).all():
+    for a in db.query(Agent).filter(Agent.workspace_id == ws).order_by(Agent.name).all():
         out.append({**agent_info(a), **_agent_stats(by_agent.get(a.id, []))})
     return out
 
 
-def tool_graph(db: Session, agent_id: str, hours: int, max_runs: int = 400) -> Dict:
+def tool_graph(db: Session, ws: int, agent_id: str, hours: int, max_runs: int = 400) -> Dict:
     """Transition graph of what this agent actually does: START -> tools -> END."""
-    runs = (db.query(RunRecord.id, RunRecord.severity).filter(RunRecord.agent_id == agent_id,
+    runs = (db.query(RunRecord.id, RunRecord.severity).filter(RunRecord.workspace_id == ws, RunRecord.agent_id == agent_id,
             RunRecord.started_at >= _window(hours)).order_by(RunRecord.started_at.desc()).limit(max_runs).all())
     if not runs:
         return {"nodes": [], "edges": [], "runs": 0}
@@ -285,7 +286,7 @@ def tool_graph(db: Session, agent_id: str, hours: int, max_runs: int = 400) -> D
     steps = (db.query(StepRecord.run_id, StepRecord.idx, StepRecord.type, StepRecord.tool_name, StepRecord.status,
                       StepRecord.latency_ms)
              .filter(StepRecord.run_id.in_(list(sev))).order_by(StepRecord.run_id, StepRecord.idx).all())
-    agent = db.get(Agent, agent_id)
+    agent = db.get(Agent, (ws, agent_id))
     registered = set(agent.registered_tools or []) if agent else set()
 
     def node_of(s) -> str:
@@ -338,13 +339,13 @@ def tool_graph(db: Session, agent_id: str, hours: int, max_runs: int = 400) -> D
     return {"nodes": node_list, "edges": edge_list, "runs": len(by_run)}
 
 
-def agent_detail(db: Session, agent_id: str, hours: int) -> Optional[Dict]:
-    a = db.get(Agent, agent_id)
+def agent_detail(db: Session, ws: int, agent_id: str, hours: int) -> Optional[Dict]:
+    a = db.get(Agent, (ws, agent_id))
     if a is None:
         return None
     now = utcnow()
     since = now - timedelta(hours=hours)
-    rows = _run_rows(db, since, agent_id)
+    rows = _run_rows(db, ws, since, agent_id)
     size = _bucket_size(hours)
     series = {k: [] for k in _bucket_keys(since, now, size)}
     for r in rows:
@@ -359,7 +360,7 @@ def agent_detail(db: Session, agent_id: str, hours: int) -> Optional[Dict]:
             "avg_risk": round(float(np.mean([r.risk_score for r in rs])), 4) if n else None,
         })
     baseline = registry.engine.baselines.get(agent_id).to_dict() if registry.engine and agent_id in registry.engine.baselines else None
-    graph = tool_graph(db, agent_id, hours)
+    graph = tool_graph(db, ws, agent_id, hours)
     return {
         **agent_info(a),
         "stats": _agent_stats(rows),
@@ -371,7 +372,7 @@ def agent_detail(db: Session, agent_id: str, hours: int) -> Optional[Dict]:
     }
 
 
-def compare_agents(db: Session, ids: Iterable[str], hours: int) -> Dict:
+def compare_agents(db: Session, ws: int, ids: Iterable[str], hours: int) -> Dict:
     ids = [i for i in ids if i]
     now = utcnow()
     since = now - timedelta(hours=hours)
@@ -379,10 +380,10 @@ def compare_agents(db: Session, ids: Iterable[str], hours: int) -> Dict:
     keys = _bucket_keys(since, now, size)
     summaries, series = [], {k: {"t": _iso(k)} for k in keys}
     for agent_id in ids:
-        a = db.get(Agent, agent_id)
+        a = db.get(Agent, (ws, agent_id))
         if a is None:
             continue
-        rows = _run_rows(db, since, agent_id)
+        rows = _run_rows(db, ws, since, agent_id)
         summaries.append({**agent_info(a), **_agent_stats(rows)})
         grouped: Dict[datetime, list] = defaultdict(list)
         for r in rows:
@@ -398,13 +399,13 @@ def _uncertainty(probs: Dict[str, float]) -> float:
     return float(-(p * np.log(p)).sum() / math.log(len(CLASSES)))
 
 
-def review_queue(db: Session, sort: str = "uncertainty", limit: int = 50, agent_id: Optional[str] = None) -> Dict:
+def review_queue(db: Session, ws: int, sort: str = "uncertainty", limit: int = 50, agent_id: Optional[str] = None) -> Dict:
     """Flagged runs awaiting a human label.
 
     sort="uncertainty" is active learning: runs the classifier is least sure
     about come first, because those labels improve the model the most.
     """
-    q = db.query(RunRecord).filter(RunRecord.severity.in_(FLAGGED), ~RunRecord.feedback.any())
+    q = db.query(RunRecord).filter(RunRecord.workspace_id == ws, RunRecord.severity.in_(FLAGGED), ~RunRecord.feedback.any())
     if agent_id:
         q = q.filter(RunRecord.agent_id == agent_id)
     rows = q.order_by(RunRecord.started_at.desc()).limit(2000).all()
@@ -413,15 +414,16 @@ def review_queue(db: Session, sort: str = "uncertainty", limit: int = 50, agent_
         items.sort(key=lambda d: d["uncertainty"], reverse=True)
     elif sort == "risk":
         items.sort(key=lambda d: d["risk_score"], reverse=True)
-    labeled = db.query(func.count(Feedback.id)).scalar()
-    unused = db.query(func.count(Feedback.id)).filter(Feedback.used_in_version.is_(None)).scalar()
+    fb = db.query(func.count(Feedback.id)).join(RunRecord, RunRecord.id == Feedback.run_id).filter(RunRecord.workspace_id == ws)
+    labeled = fb.scalar()
+    unused = fb.filter(Feedback.used_in_version.is_(None)).scalar()
     return {"total": len(items), "items": items[:limit], "labels_total": labeled, "labels_not_yet_trained": unused}
 
 
-def behavior_map(db: Session, limit: int = 800) -> Dict:
+def behavior_map(db: Session, ws: int, limit: int = 800) -> Dict:
     rows = (db.query(RunRecord.id, RunRecord.agent_id, RunRecord.coords, RunRecord.cluster_id, RunRecord.severity,
                      RunRecord.failure_type, RunRecord.risk_score)
-            .order_by(RunRecord.started_at.desc()).limit(limit).all())
+            .filter(RunRecord.workspace_id == ws).order_by(RunRecord.started_at.desc()).limit(limit).all())
     clusters = registry.engine.unsupervised.clusters if registry.engine else []
     return {
         "points": [{"id": r.id, "agent_id": r.agent_id, "x": r.coords[0], "y": r.coords[1], "cluster": r.cluster_id,
@@ -431,8 +433,8 @@ def behavior_map(db: Session, limit: int = 800) -> Dict:
     }
 
 
-def policy_analytics(db: Session) -> Dict:
-    events = db.query(PolicyEvent).order_by(PolicyEvent.created_at).all()
+def policy_analytics(db: Session, ws: int) -> Dict:
+    events = db.query(PolicyEvent).filter(PolicyEvent.workspace_id == ws).order_by(PolicyEvent.created_at).all()
     rewarded = [e for e in events if e.reward is not None]
     by_day: Dict[str, List[float]] = defaultdict(list)
     for e in rewarded:
