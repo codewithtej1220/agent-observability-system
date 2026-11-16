@@ -76,7 +76,9 @@ export function AuthPage({ mode }) {
         </form>
         <div className="small text-2" style={{ marginTop: 16 }}>
           {signup ? <>Already have an account? <Link to="/login">Sign in</Link></> : <>New here? <Link to="/signup">Create an account</Link></>}
+          {" · "}<Link to="/pricing">Plans & pricing</Link>
         </div>
+        {signup && <div className="small muted" style={{ marginTop: 8 }}>Free plan, no card needed. Pro is $5 a month, with a 14-day free trial.</div>}
       </div>
     </div>
   );

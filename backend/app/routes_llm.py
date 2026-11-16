@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from . import plans
 from .auth import Ctx, require_access, role
 from .config import get_settings
 from .db import get_db
@@ -23,7 +24,9 @@ from .llm.judge import DEFAULT_JUDGE_MODELS
 from .llm.providers import get_adapter
 from .llm.upstream import call_json, credential_key, resolve_credential
 from .orm import PROVIDERS, ProviderCredential, utcnow
-from .orm_llm import EVENT_METRICS, WINDOW_METRICS, AlertEvent, AlertRule, Contract, DriftRun, DriftTest, LLMCall
+from .orm_llm import (EVENT_METRICS, FEEDBACK_VERDICTS, WINDOW_METRICS, AlertEvent, AlertRule, CallFeedback, Contract,
+                      DriftRun, DriftTest, LLMCall)
+from .realtime import broker
 from .services.analytics import _bucket_keys, _bucket_of, _bucket_size, _iso
 
 router = APIRouter(prefix="/api")
@@ -176,7 +179,56 @@ def get_call(call_id: str, ctx: Ctx = Depends(require_access), db: Session = Dep
             "system_prompt": c.system_prompt, "last_user": c.last_user, "n_messages": c.n_messages,
             "response_text": c.response_text, "content_stored": c.content_stored, "finish_reason": c.finish_reason,
             "usage_estimated": c.usage_estimated, "judge_cost_usd": c.judge_cost_usd, "relevance": c.relevance,
-            "pii_flag": c.pii_flag, "injection_flag": c.injection_flag, "checks": c.checks, "attempts": c.attempts}
+            "pii_flag": c.pii_flag, "injection_flag": c.injection_flag, "checks": c.checks, "attempts": c.attempts,
+            "feedback": [{"verdict": f.verdict, "note": f.note, "mine": ctx.user is not None and f.user_id == ctx.user.id,
+                          "created_at": _iso(f.created_at)}
+                         for f in db.query(CallFeedback).filter(CallFeedback.call_id == c.id).order_by(CallFeedback.id)]}
+
+
+class FeedbackIn(BaseModel):
+    verdict: Literal["correct", "false_positive", "missed"]
+    note: str = Field("", max_length=2000)
+
+
+@router.post("/llm/calls/{call_id}/feedback", tags=["llm"])
+def call_feedback(call_id: str, body: FeedbackIn, ctx: Ctx = Depends(member), db: Session = Depends(get_db)):
+    """Reviewer verdict on this call's flags: correct, false positive, or a problem the checks missed."""
+    c = db.get(LLMCall, call_id)
+    if c is None or c.workspace_id != ctx.workspace_id:
+        raise HTTPException(404, "Call not found")
+    uid = ctx.user.id if ctx.user else 0
+    f = db.query(CallFeedback).filter(CallFeedback.call_id == call_id, CallFeedback.user_id == uid).first()
+    if f is None:
+        f = CallFeedback(workspace_id=ctx.workspace_id, call_id=call_id, user_id=uid, verdict=body.verdict)
+        db.add(f)
+    f.verdict, f.note = body.verdict, body.note.strip()
+    db.commit()
+    return {"ok": True, "verdict": f.verdict}
+
+
+@router.get("/llm/check-quality", tags=["llm"])
+def check_quality(ctx: Ctx = Depends(require_access), db: Session = Depends(get_db)):
+    """Measured precision of each check, from reviewer feedback on calls it flagged."""
+    rows = (db.query(CallFeedback, LLMCall).join(LLMCall, LLMCall.id == CallFeedback.call_id)
+            .filter(CallFeedback.workspace_id == ctx.workspace_id).all())
+    per: Dict[str, Dict[str, Any]] = {}
+    missed = 0
+    for f, call in rows:
+        if f.verdict == "missed":
+            missed += 1
+            continue
+        for chk in call.checks or []:
+            if chk.get("passed", True) or chk.get("skipped") or chk.get("severity") == "info":
+                continue
+            d = per.setdefault(chk.get("type") or chk.get("rule_id"), {"check": chk.get("label"), "confirmed": 0,
+                                                                         "false_positive": 0})
+            d["confirmed" if f.verdict == "correct" else "false_positive"] += 1
+    items = []
+    for key, d in per.items():
+        n = d["confirmed"] + d["false_positive"]
+        items.append({"type": key, **d, "reviewed": n, "precision": _rate(d["confirmed"], n)})
+    items.sort(key=lambda x: (x["precision"] if x["precision"] is not None else 1, -x["reviewed"]))
+    return {"items": items, "reviews": len(rows), "missed": missed}
 
 
 # =========================================================================== browser extension
@@ -204,6 +256,8 @@ async def ingest_browser_turn(body: BrowserTurnIn, ctx: Ctx = Depends(member), d
     from .llm.providers import estimate_tokens
 
     ws = ctx.workspace
+    plans.check_rate(ws)
+    plans.check_quota(db, ws, "llm_calls")
     contract = None
     if body.project:
         contract = db.query(Contract).filter(Contract.workspace_id == ws.id, Contract.slug == body.project,
@@ -220,7 +274,8 @@ async def ingest_browser_turn(body: BrowserTurnIn, ctx: Ctx = Depends(member), d
     if is_new:
         call = LLMCall(id=call_id, workspace_id=ws.id, created_at=utcnow())
         db.add(call)
-    call.provider, call.model, call.endpoint = BROWSER_APPS[body.app], body.model or body.app, body.app
+    model = " ".join(body.model.split())   # site labels can span several lines; keep one
+    call.provider, call.model, call.endpoint = BROWSER_APPS[body.app], model or body.app, body.app
     call.source, call.session_id, call.tags = "browser", body.conversation_id, [body.app]
     call.contract_id = contract.id if contract else None
     call.status_code, call.error, call.streamed, call.latency_ms = 200, "", True, 0.0
@@ -233,6 +288,11 @@ async def ingest_browser_turn(body: BrowserTurnIn, ctx: Ctx = Depends(member), d
     call.relevance, call.severity = ev.relevance, ev.severity
     call.pii_flag, call.injection_flag = ev.has("pii_output"), ev.has("prompt_injection")
     db.commit()
+    if is_new:
+        plans.increment(db, ws.id, "llm_calls")
+    broker.publish(ws.id, "call", {"id": call.id, "provider": call.provider, "model": call.model,
+                                   "severity": call.severity, "source": "browser", "enforcement_action": "none",
+                                   "failed_checks": [c.label for c in ev.violations][:5], "created_at": _iso(call.created_at)})
     if is_new:
         await alerts_mod.on_call_evaluated(db, ws, call)
     failed = [c.label for c in ev.checks if not c.passed and not c.skipped and c.severity != "info"]
@@ -251,13 +311,16 @@ class ContractIn(BaseModel):
     max_repairs: int = Field(1, ge=0, le=3)
     fallback_models: List[str] = []
     judge_in_enforcement: bool = False
+    auto_redact: bool = True
+    auto_fix_json: bool = True
     active: bool = True
 
 
 def _contract_out(c: Contract) -> Dict[str, Any]:
     return {"id": c.id, "name": c.name, "slug": c.slug, "description": c.description, "rules": c.rules,
             "mode": c.mode, "max_repairs": c.max_repairs, "fallback_models": c.fallback_models,
-            "judge_in_enforcement": c.judge_in_enforcement, "active": c.active,
+            "judge_in_enforcement": c.judge_in_enforcement, "auto_redact": c.auto_redact,
+            "auto_fix_json": c.auto_fix_json, "active": c.active,
             "created_at": _iso(c.created_at), "updated_at": _iso(c.updated_at)}
 
 
@@ -278,23 +341,33 @@ def list_contracts(ctx: Ctx = Depends(require_access), db: Session = Depends(get
     return [{**_contract_out(c), "stats_7d": _stats(stats.get(c.id, []))} for c in rows]
 
 
-def _apply_contract(c: Contract, body: ContractIn) -> None:
+def _apply_contract(c: Contract, body: ContractIn, ws=None) -> None:
     try:
         rules = validate_rules(body.rules)
     except (ValueError, TypeError) as e:
         raise HTTPException(422, str(e)) from e
+    if ws is not None:
+        # Only new use of a paid feature is refused; saved contracts stay editable after a downgrade.
+        if body.mode != "monitor" and body.mode != c.mode:
+            plans.require_feature(ws, "enforcement")
+        old_judges = {r["id"] for r in (c.rules or []) if r.get("type") == "llm_judge"}
+        if any(r["type"] == "llm_judge" and r["id"] not in old_judges for r in rules):
+            plans.require_feature(ws, "judge")
     c.name, c.slug, c.description = body.name.strip(), body.slug, body.description
     c.rules, c.mode, c.max_repairs = rules, body.mode, body.max_repairs
     c.fallback_models = [m.strip() for m in body.fallback_models if m.strip()][:3]
     c.judge_in_enforcement, c.active = body.judge_in_enforcement, body.active
+    c.auto_redact, c.auto_fix_json = body.auto_redact, body.auto_fix_json
 
 
 @router.post("/llm/contracts", tags=["llm"])
 def create_contract(body: ContractIn, ctx: Ctx = Depends(member), db: Session = Depends(get_db)):
     if db.query(Contract).filter(Contract.workspace_id == ctx.workspace_id, Contract.slug == body.slug).first():
         raise HTTPException(409, f"A contract with slug '{body.slug}' already exists")
-    c = Contract(workspace_id=ctx.workspace_id)
-    _apply_contract(c, body)
+    plans.check_count(db, ctx.workspace, "contracts",
+                      db.query(Contract).filter(Contract.workspace_id == ctx.workspace_id).count())
+    c = Contract(workspace_id=ctx.workspace_id, mode="monitor", rules=[])
+    _apply_contract(c, body, ctx.workspace)
     db.add(c)
     db.commit()
     return _contract_out(c)
@@ -319,7 +392,7 @@ def update_contract(cid: int, body: ContractIn, ctx: Ctx = Depends(member), db: 
                                       Contract.id != cid).first()
     if clash:
         raise HTTPException(409, f"A contract with slug '{body.slug}' already exists")
-    _apply_contract(c, body)
+    _apply_contract(c, body, ctx.workspace)
     db.commit()
     return _contract_out(c)
 
@@ -399,6 +472,9 @@ def _apply_rule(r: AlertRule, body: AlertRuleIn) -> None:
 
 @router.post("/llm/alert-rules", tags=["alerts"])
 def create_rule(body: AlertRuleIn, ctx: Ctx = Depends(member), db: Session = Depends(get_db)):
+    plans.check_count(db, ctx.workspace, "alert_rules",
+                      db.query(AlertRule).filter(AlertRule.workspace_id == ctx.workspace_id).count())
+    plans.check_channels(ctx.workspace, body.channels)
     r = AlertRule(workspace_id=ctx.workspace_id)
     _apply_rule(r, body)
     db.add(r)
@@ -416,6 +492,7 @@ def _get_rule(db, ctx, rid) -> AlertRule:
 @router.patch("/llm/alert-rules/{rid}", tags=["alerts"])
 def update_rule(rid: int, body: AlertRuleIn, ctx: Ctx = Depends(member), db: Session = Depends(get_db)):
     r = _get_rule(db, ctx, rid)
+    plans.check_channels(ctx.workspace, {k: v for k, v in body.channels.items() if not (r.channels or {}).get(k)})
     _apply_rule(r, body)
     db.commit()
     return _rule_out(r)
@@ -511,6 +588,8 @@ def _apply_test(db: Session, ctx: Ctx, t: DriftTest, body: DriftTestIn) -> None:
 
 @router.post("/llm/drift-tests", tags=["drift"])
 def create_test(body: DriftTestIn, ctx: Ctx = Depends(member), db: Session = Depends(get_db)):
+    plans.check_count(db, ctx.workspace, "drift_tests",
+                      db.query(DriftTest).filter(DriftTest.workspace_id == ctx.workspace_id).count())
     t = DriftTest(workspace_id=ctx.workspace_id, prompt="")
     _apply_test(db, ctx, t, body)
     db.add(t)

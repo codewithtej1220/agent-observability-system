@@ -13,6 +13,7 @@ Anything else is proxied without analysis.
 from __future__ import annotations
 
 import copy
+import time
 import json
 import re
 from dataclasses import dataclass, field
@@ -176,6 +177,15 @@ class Adapter:
     def models_path(self) -> str:
         raise NotImplementedError
 
+    # Corrections: replace the answer text while keeping the provider's format.
+    def rewrite_response(self, path: str, body: Dict, text: str) -> Optional[Dict]:
+        """Non-streaming: return the body with its text replaced, or None if not possible."""
+        return None
+
+    def synthesize_stream(self, path: str, model: str, text: str, c: "Completion") -> Optional[bytes]:
+        """Streaming: a complete, minimal SSE stream carrying `text`, or None if not possible."""
+        return None
+
     def error_body(self, message: str, code: str, details: Any = None) -> Dict:
         return {"error": {"type": code, "code": code, "message": message, "aobs": details}}
 
@@ -290,6 +300,26 @@ class OpenAIAdapter(Adapter):
     def models_path(self):
         return "v1/models"
 
+    def rewrite_response(self, path, body, text):
+        if self._is_responses(path) or not body.get("choices"):
+            return None
+        body = copy.deepcopy(body)
+        msg = body["choices"][0].setdefault("message", {})
+        if msg.get("tool_calls"):
+            return None
+        msg["content"] = text
+        return body
+
+    def synthesize_stream(self, path, model, text, c):
+        if self._is_responses(path) or c.tool_calls:
+            return None
+        base = {"id": "chatcmpl-aobs-corrected", "object": "chat.completion.chunk", "created": int(time.time()), "model": model}
+        chunks = [
+            {**base, "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}]},
+            {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": c.finish_reason or "stop"}]},
+        ]
+        return b"".join(b"data: " + json.dumps(ch).encode() + b"\n\n" for ch in chunks) + b"data: [DONE]\n\n"
+
 
 # --------------------------------------------------------------------------- Anthropic
 class AnthropicAdapter(Adapter):
@@ -358,6 +388,29 @@ class AnthropicAdapter(Adapter):
 
     def models_path(self):
         return "v1/models"
+
+    def rewrite_response(self, path, body, text):
+        if any(b.get("type") == "tool_use" for b in body.get("content", [])):
+            return None
+        body = copy.deepcopy(body)
+        body["content"] = [{"type": "text", "text": text}]
+        return body
+
+    def synthesize_stream(self, path, model, text, c):
+        if c.tool_calls:
+            return None
+        events = [
+            ("message_start", {"type": "message_start", "message": {
+                "id": "msg_aobs_corrected", "type": "message", "role": "assistant", "model": model, "content": [],
+                "stop_reason": None, "usage": {"input_tokens": c.input_tokens or 0, "output_tokens": 1}}}),
+            ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            ("message_delta", {"type": "message_delta", "delta": {"stop_reason": c.finish_reason or "end_turn"},
+                               "usage": {"output_tokens": c.output_tokens or estimate_tokens(text)}}),
+            ("message_stop", {"type": "message_stop"}),
+        ]
+        return b"".join(f"event: {name}\ndata: {json.dumps(data)}\n\n".encode() for name, data in events)
 
 
 # --------------------------------------------------------------------------- Gemini
@@ -429,6 +482,23 @@ class GeminiAdapter(Adapter):
 
     def models_path(self):
         return "v1beta/models"
+
+    def rewrite_response(self, path, body, text):
+        cands = body.get("candidates") or []
+        if not cands or any("functionCall" in p for p in (cands[0].get("content") or {}).get("parts", [])):
+            return None
+        body = copy.deepcopy(body)
+        body["candidates"][0].setdefault("content", {"role": "model"})["parts"] = [{"text": text}]
+        return body
+
+    def synthesize_stream(self, path, model, text, c):
+        if c.tool_calls:
+            return None
+        chunk = {"candidates": [{"content": {"role": "model", "parts": [{"text": text}]}, "finishReason": c.finish_reason or "STOP"}],
+                 "usageMetadata": {"promptTokenCount": c.input_tokens or 0, "candidatesTokenCount": c.output_tokens or estimate_tokens(text)}}
+        if "alt=sse" not in path and "streamGenerateContent" in path:
+            return json.dumps([chunk]).encode()  # non-SSE stream format: a JSON array
+        return b"data: " + json.dumps(chunk).encode() + b"\r\n\r\n"
 
 
 ADAPTERS: Dict[str, Adapter] = {a.name: a for a in (OpenAIAdapter(), AnthropicAdapter(), GeminiAdapter())}

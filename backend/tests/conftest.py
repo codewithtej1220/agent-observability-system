@@ -83,3 +83,16 @@ def new_user(client):
         return c, email
 
     return _make
+
+
+def set_plan(client, plan: str, status: str = "active") -> int:
+    """Put the signed-in client's current workspace on `plan`; returns the workspace id."""
+    from app.db import SessionLocal
+    from app.orm import Workspace
+
+    ws_id = client.get("/api/auth/me").json()["workspace"]["id"]
+    with SessionLocal() as db:
+        ws = db.get(Workspace, ws_id)
+        ws.plan, ws.plan_status = plan, status
+        db.commit()
+    return ws_id

@@ -3,6 +3,7 @@ import { Bar, BarChart, CartesianGrid, LabelList, ResponsiveContainer, Tooltip, 
 import { useApi } from "../../api";
 import { useRange } from "../../App";
 import { Async, Card, ChartTip, Legend, Meter, Tile } from "../../components/ui";
+import Onboarding from "../../components/Onboarding";
 import { fmtAgo, fmtCompact, fmtInt, fmtPct, fmtTime, fmtUsd } from "../../format";
 import { axisProps, usePalette } from "../../theme";
 import { CallSeverity, EnforcementBadge, PROVIDER_LABEL } from "./common";
@@ -24,15 +25,22 @@ function Body({ d, hours }) {
   const pal = usePalette();
   const nav = useNavigate();
   const k = d.kpis;
+  const latest = useApi(k.calls === 0 ? "/api/llm/calls?limit=1" : null).data?.items?.[0];
   if (k.calls === 0) {
     return (
       <>
         <div className="page-head"><div><h1>LLM overview</h1></div></div>
+        <Onboarding />
         <Card>
           <div className="empty">
             <div style={{ fontSize: 15, color: "var(--text)", marginBottom: 6 }}>No LLM calls in the last {hours}h.</div>
-            Route your OpenAI, Claude or Gemini calls through the gateway to start monitoring.{" "}
-            <Link to="/llm/connect">Connect your LLMs</Link>
+            {latest ? (
+              <>The last call was {fmtAgo(latest.created_at)} ({latest.provider} · {latest.model}).{" "}
+                <Link to="/llm/calls">See all calls</Link> or <Link to="/llm/connect">connect another app</Link>.</>
+            ) : (
+              <>Route your OpenAI, Claude or Gemini calls through the gateway to start monitoring.{" "}
+                <Link to="/llm/connect">Connect your LLMs</Link></>
+            )}
           </div>
         </Card>
       </>
@@ -52,6 +60,7 @@ function Body({ d, hours }) {
           <p>How your models are behaving across every app routed through the gateway: instruction adherence, failures, latency and spend. Last {hours}h.</p>
         </div>
       </div>
+      <Onboarding />
       <div className="tiles">
         <Tile label="LLM calls" value={fmtInt(k.calls)} delta={`${fmtInt(d.previous.calls)} in previous period`} />
         <Tile label="Rule violation rate" value={fmtPct(k.violation_rate)} delta={viol.text} deltaGood={viol.good} hint="Share of calls that broke at least one contract rule" />

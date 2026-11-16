@@ -14,10 +14,12 @@ from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
+from ml import real_traces
+from ml.bandit import LinUCBPolicy
 from ml.schema import Run
-from ml.simulator import generate_dataset
-from ml.training import evaluate, train_engine, unseen_failure_robustness, warm_start_policy
+from ml.training import evaluate, train_engine, unseen_failure_robustness
 
+from ..config import BACKEND_DIR
 from ..db import SessionLocal
 from ..orm import Agent, Feedback, ModelVersion, RunRecord
 from .ingest import to_ml_run
@@ -26,16 +28,16 @@ from .registry import registry
 log = logging.getLogger(__name__)
 PROMOTION_TOLERANCE = 0.02
 
-# Fixed seeds keep the simulated reference data identical across versions,
-# so version-to-version metric changes come from the models, not the data.
-TRAIN_SEED, VAL_SEED, TEST_SEED, POLICY_SEED = 101, 202, 303, 404
+DATA_DIR = BACKEND_DIR / "data"
 
 
 def reference_data() -> Tuple[List[Run], List[Run], List[Run]]:
-    train = generate_dataset(2500, seed=TRAIN_SEED, balanced=True)
-    val = generate_dataset(800, seed=VAL_SEED)
-    test = generate_dataset(1500, seed=TEST_SEED, failure_scale=1.5)
-    return train, val, test
+    """Real agent runs (SWE-agent trajectories), split by GitHub issue.
+
+    The split is fixed, so version-to-version metric changes come from the
+    models and the human labels, not from a different test set.
+    """
+    return real_traces.splits(DATA_DIR)
 
 
 def human_labeled_runs(db: Session) -> List[Tuple[Run, str, int]]:
@@ -102,12 +104,15 @@ def train_new_version(db: Session, trigger: str, robustness: bool = False) -> Mo
     return mv
 
 
-def warm_start(db: Session) -> Dict:
-    assert registry.engine is not None
-    runs = generate_dataset(1500, seed=POLICY_SEED)
-    policy, report = warm_start_policy(registry.engine, runs)
-    registry.set_policy(policy, report)
-    return report
+def reset_policy(db: Session) -> None:
+    """Start the intervention policy from zero.
+
+    No public dataset records what happened after an intervention, so there is
+    nothing real to pre-train on. Until it has learned from enough reviewed
+    outcomes, the policy follows the failure-type playbook (ml/bandit.py).
+    """
+    registry.set_policy(LinUCBPolicy())
+    registry.warmstart_path.unlink(missing_ok=True)
 
 
 def retrain_in_background(trigger: str) -> bool:

@@ -14,12 +14,15 @@ from sqlalchemy.orm import Session
 
 from ml import CLASSES, FAILURE_TYPES
 from ml.bandit import ACTION_LABELS, ACTIONS, CRITICAL_THRESHOLD, WARN_THRESHOLD
+from ml.corrections import build_correction
 from ml.features import FEATURE_DESCRIPTIONS
 
+from . import plans
 from .auth import Ctx, require_access, role
 from .config import get_settings
 from .db import get_db
 from .orm import Agent, ModelVersion, RunRecord
+from .realtime import broker
 from .schemas import AgentIn, AssessmentOut, FeedbackIn, RunIn, RunStartIn, StepIn
 from .services import analytics, ingest, training
 from .services.registry import registry
@@ -28,45 +31,67 @@ router = APIRouter(prefix="/api")
 member = role("member")
 
 
-def _assessment(rec: RunRecord) -> AssessmentOut:
+def correction_for(db: Session, rec: RunRecord):
+    agent = db.get(Agent, (rec.workspace_id, rec.agent_id))
+    return build_correction(rec.failure_type, rec.signals or [], rec.recommended_action,
+                            agent.registered_tools if agent else None)
+
+
+def _assessment(rec: RunRecord, db: Optional[Session] = None) -> AssessmentOut:
     d = rec.decision or {}
+    if db is not None and rec.severity != "healthy":
+        broker.publish(rec.workspace_id, "run", {"id": rec.id, "agent_id": rec.agent_id, "severity": rec.severity,
+                                                 "failure_type": rec.failure_type, "risk_score": rec.risk_score})
     return AssessmentOut(
         run_id=rec.id, step_count=rec.n_steps, risk_score=rec.risk_score, severity=rec.severity,
         failure_type=rec.failure_type, probabilities=rec.probabilities or {}, signals=rec.signals or [],
         recommended_action=rec.recommended_action, action_label=ACTION_LABELS.get(rec.recommended_action, ""),
         action_reason=d.get("reason", ""), first_flag_step=rec.first_flag_step, model_version=rec.model_version,
+        correction=correction_for(db, rec) if db is not None else None,
     )
+
+
+def _meter(db: Session, ctx: Ctx, runs: int) -> None:
+    """Agent runs count against the monthly quota when they are created."""
+    plans.check_quota(db, ctx.workspace, "agent_runs")
+    left = plans.quota_left(db, ctx.workspace, "agent_runs")
+    if left is not None and left < runs:
+        raise HTTPException(402, f"This batch has {runs} runs but only {left} remain in this month's quota.")
+    plans.increment(db, ctx.workspace_id, "agent_runs", runs)
 
 
 # ---------------------------------------------------------------- ingest
 @router.post("/ingest/runs", response_model=AssessmentOut, tags=["ingest"])
 def ingest_run(payload: RunIn, ctx: Ctx = Depends(member), db: Session = Depends(get_db)):
     """Ingest a completed run and score it."""
-    return _assessment(ingest.ingest_runs(db, ctx.workspace_id, [payload])[0])
+    _meter(db, ctx, 1)
+    return _assessment(ingest.ingest_runs(db, ctx.workspace_id, [payload])[0], db)
 
 
 @router.post("/ingest/runs/batch", response_model=List[AssessmentOut], tags=["ingest"])
 def ingest_batch(payloads: List[RunIn], ctx: Ctx = Depends(member), db: Session = Depends(get_db)):
     if len(payloads) > 500:
         raise HTTPException(413, "At most 500 runs per batch")
-    return [_assessment(r) for r in ingest.ingest_runs(db, ctx.workspace_id, payloads)]
+    _meter(db, ctx, len(payloads))
+    return [_assessment(r, db) for r in ingest.ingest_runs(db, ctx.workspace_id, payloads)]
 
 
 @router.post("/ingest/runs/start", response_model=AssessmentOut, tags=["ingest"])
 def start_run(payload: RunStartIn, ctx: Ctx = Depends(member), db: Session = Depends(get_db)):
     """Open a live run. Then POST each step to /ingest/runs/{run_id}/steps."""
-    return _assessment(ingest.start_run(db, ctx.workspace_id, payload))
+    _meter(db, ctx, 1)
+    return _assessment(ingest.start_run(db, ctx.workspace_id, payload), db)
 
 
 @router.post("/ingest/runs/{run_id}/steps", response_model=AssessmentOut, tags=["ingest"])
 def append_step(run_id: str, step: StepIn, ctx: Ctx = Depends(member), db: Session = Depends(get_db)):
     """Append one step; returns the live risk assessment and recommended intervention."""
-    return _assessment(ingest.append_step(db, ctx.workspace_id, run_id, step))
+    return _assessment(ingest.append_step(db, ctx.workspace_id, run_id, step), db)
 
 
 @router.post("/ingest/runs/{run_id}/finish", response_model=AssessmentOut, tags=["ingest"])
 def finish_run(run_id: str, ctx: Ctx = Depends(member), db: Session = Depends(get_db)):
-    return _assessment(ingest.finish_run(db, ctx.workspace_id, run_id))
+    return _assessment(ingest.finish_run(db, ctx.workspace_id, run_id), db)
 
 
 # ---------------------------------------------------------------- dashboard
@@ -109,6 +134,8 @@ def get_run(run_id: str, ctx: Ctx = Depends(require_access), db: Session = Depen
     d = analytics.run_detail(db, ctx.workspace_id, run_id)
     if d is None:
         raise HTTPException(404, "Run not found")
+    d["correction"] = build_correction(d.get("failure_type"), d.get("signals") or [], d.get("recommended_action") or "",
+                                       (d.get("agent") or {}).get("registered_tools"))
     return d
 
 

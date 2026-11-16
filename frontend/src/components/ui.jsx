@@ -1,3 +1,7 @@
+import { createContext, useCallback, useContext, useRef, useState } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
+import * as Tooltip from "@radix-ui/react-tooltip";
+import { AlertCircle, Inbox, RefreshCw } from "lucide-react";
 import { FAILURE_LABEL, usePalette } from "../theme";
 import { humanize } from "../format";
 
@@ -72,24 +76,97 @@ export function RiskMeter({ risk }) {
   );
 }
 
-export const Loading = () => <div className="empty">Loading…</div>;
-export const Empty = ({ children = "No data for this selection." }) => <div className="empty">{children}</div>;
-
-export function ErrorBox({ error }) {
+/** Placeholder blocks shaped like content, shown while data loads. */
+export function Skeleton({ rows = 4 }) {
   return (
-    <div className="error-box">
-      <strong>Could not load data.</strong> {String(error?.message || error)}
-      <div className="small" style={{ marginTop: 4 }}>
-        Is the API running on port 8000 and have models been bootstrapped? (<code>python -m scripts.bootstrap</code>)
+    <div className="skeleton" aria-busy="true" aria-label="Loading">
+      <div className="sk-tiles">{[0, 1, 2, 3].map((i) => <div key={i} className="sk sk-tile" />)}</div>
+      {Array.from({ length: rows }, (_, i) => <div key={i} className="sk sk-line" style={{ width: `${92 - i * 9}%` }} />)}
+    </div>
+  );
+}
+
+export const Loading = () => <Skeleton rows={3} />;
+
+export function EmptyState({ icon: Icon = Inbox, title, children, action }) {
+  return (
+    <div className="empty-state">
+      <div className="empty-icon"><Icon size={22} strokeWidth={1.75} /></div>
+      {title && <div className="empty-title">{title}</div>}
+      {children && <div className="empty-body">{children}</div>}
+      {action && <div style={{ marginTop: 12 }}>{action}</div>}
+    </div>
+  );
+}
+
+export const Empty = ({ children = "No data for this selection." }) => <EmptyState>{children}</EmptyState>;
+
+export function ErrorBox({ error, onRetry }) {
+  return (
+    <div className="error-box" role="alert">
+      <div className="row" style={{ gap: 8, flexWrap: "nowrap", alignItems: "flex-start" }}>
+        <AlertCircle size={18} style={{ flex: "none", marginTop: 1 }} />
+        <div style={{ flex: 1 }}>
+          <strong>Could not load data.</strong> {String(error?.message || error)}
+          <div className="small" style={{ marginTop: 4 }}>
+            Check that the API is running (<code>uvicorn app.main:app --port 8000</code> in <code>backend/</code>).
+          </div>
+        </div>
+        {onRetry && <button onClick={onRetry} className="btn-icon-text"><RefreshCw size={14} /> Retry</button>}
       </div>
     </div>
   );
 }
 
-export function Async({ state, children }) {
-  if (state.error && !state.data) return <ErrorBox error={state.error} />;
-  if (!state.data) return <Loading />;
+export function Async({ state, children, skeleton }) {
+  if (state.error && !state.data) return <ErrorBox error={state.error} onRetry={state.reload} />;
+  if (!state.data) return skeleton || <Loading />;
   return children(state.data);
+}
+
+/** Hover/focus tooltip. */
+export function Tip({ label, children, side = "top" }) {
+  return (
+    <Tooltip.Root delayDuration={250}>
+      <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Content className="tooltip" side={side} sideOffset={6}>{label}</Tooltip.Content>
+      </Tooltip.Portal>
+    </Tooltip.Root>
+  );
+}
+
+// ---------------------------------------------------------------- confirm dialog
+const ConfirmContext = createContext(null);
+export const useConfirm = () => useContext(ConfirmContext);
+
+/** Accessible replacement for window.confirm: `if (await confirm({...})) ...` */
+export function ConfirmProvider({ children }) {
+  const [opts, setOpts] = useState(null);
+  const resolver = useRef(null);
+  const confirm = useCallback((o) => new Promise((resolve) => { resolver.current = resolve; setOpts(o); }), []);
+  const close = (v) => { resolver.current?.(v); setOpts(null); };
+  return (
+    <ConfirmContext.Provider value={confirm}>
+      {children}
+      <Dialog.Root open={!!opts} onOpenChange={(o) => !o && close(false)}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog">
+            <Dialog.Title className="dialog-title">{opts?.title}</Dialog.Title>
+            <Dialog.Description className="dialog-body">{opts?.body}</Dialog.Description>
+            <div className="dialog-actions">
+              {/* Destructive actions start focused on Cancel, so a stray Enter is harmless. */}
+              <button onClick={() => close(false)} autoFocus={!!opts?.danger}>Cancel</button>
+              <button className={opts?.danger ? "danger" : "primary"} onClick={() => close(true)} autoFocus={!opts?.danger}>
+                {opts?.confirmLabel || "Confirm"}
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+    </ConfirmContext.Provider>
+  );
 }
 
 export function ChartTip({ active, payload, label, labelFormatter, valueFormatter = (v) => v, names = {} }) {

@@ -6,9 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
@@ -17,7 +20,9 @@ from . import crypto
 from .routes import router
 from .llm import upstream, worker
 from .llm.gateway import router as gateway_router
+from .realtime import broker
 from .routes_account import router as account_router
+from .routes_billing import router as billing_router
 from .routes_llm import router as llm_router
 from .services.registry import registry
 
@@ -27,6 +32,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    broker.bind(asyncio.get_running_loop())
     crypto.check_ready()
     db = SessionLocal()
     try:
@@ -55,8 +61,26 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["X-API-Key", "Content-Type", "X-Requested-With", "Authorization"],
+    expose_headers=["X-Request-ID"],
 )
+
+
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    """Request IDs for tracing, and safe default security headers."""
+    rid = request.headers.get("x-request-id") or uuid.uuid4().hex
+    response = await call_next(request)
+    response.headers.setdefault("X-Request-ID", rid)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    if request.url.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+
 app.include_router(account_router)
+app.include_router(billing_router)
 app.include_router(router)
 app.include_router(llm_router)
 app.include_router(gateway_router)
@@ -66,3 +90,16 @@ app.include_router(gateway_router)
 def health():
     return {"status": "ok", "models_loaded": registry.ready,
             "model_version": registry.engine.version if registry.engine else None}
+
+
+@app.get("/health/ready", tags=["system"])
+def ready():
+    """Readiness: the database answers and the models are loaded."""
+    try:
+        with SessionLocal() as db:
+            db.execute(text("SELECT 1"))
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"status": "unavailable", "database": str(e)[:200]}, status_code=503)
+    if not registry.ready:
+        return JSONResponse({"status": "starting", "database": "ok", "models_loaded": False}, status_code=503)
+    return {"status": "ok", "database": "ok", "models_loaded": True}

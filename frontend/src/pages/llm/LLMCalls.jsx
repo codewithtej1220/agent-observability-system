@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { useApi } from "../../api";
+import { toast } from "sonner";
+import { api, useApi } from "../../api";
+import { useAuth } from "../../auth";
 import { Async, Card, Pager, Tile } from "../../components/ui";
 import { fmtAgo, fmtInt, fmtNum, fmtPct, fmtTime, fmtUsd, humanize } from "../../format";
 import { CallSeverity, EnforcementBadge, PROVIDER_LABEL } from "./common";
@@ -99,9 +101,9 @@ export function LLMCalls() {
                         <td><div className="row" style={{ gap: 4 }}><CallSeverity severity={c.severity} /><EnforcementBadge action={c.enforcement_action} /></div>
                           {c.status_code >= 400 && c.enforcement_action !== "blocked" && <div className="small muted">HTTP {c.status_code}</div>}</td>
                         <td className="small text-2" style={{ maxWidth: 260 }}>{c.failed_checks.join(" · ") || "–"}</td>
-                        <td className="r small">{fmtInt(c.latency_ms)} ms</td>
+                        <td className="r small">{c.latency_ms ? `${fmtInt(c.latency_ms)} ms` : "–"}</td>
                         <td className="r small">{fmtInt(c.input_tokens + c.output_tokens)}</td>
-                        <td className="r small">{fmtUsd(c.cost_usd, 4)}</td>
+                        <td className="r small">{c.source === "browser" ? "–" : fmtUsd(c.cost_usd, 4)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -122,8 +124,19 @@ export function LLMCallDetail() {
   return <Async state={state}>{(c) => <CallBody c={c} />}</Async>;
 }
 
+// Built-in checks run on every successful call; only failures are stored, so passes are shown here.
+const BUILTIN_CHECKS = [
+  ["empty_response", "Response is not empty"], ["truncated", "Response not cut off"],
+  ["pii_output", "No personal data in response"], ["prompt_injection", "No prompt-injection attempt"],
+  ["refusal", "Model did not refuse"],
+];
+
 function CallBody({ c }) {
-  const checks = [...c.checks].sort((a, b) => Number(a.passed) - Number(b.passed));
+  const failedTypes = new Set(c.checks.map((x) => x.type));
+  const passedBuiltins = c.status_code < 400 ? BUILTIN_CHECKS.filter(([t]) => !failedTypes.has(t))
+    .map(([type, label]) => ({ type, label, passed: true, severity: "built-in", source: "builtin", detail: "" })) : [];
+  const checks = [...c.checks, ...passedBuiltins].sort((a, b) => Number(a.passed) - Number(b.passed));
+  const isWeb = c.source === "browser";
   return (
     <>
       <div className="page-head">
@@ -137,9 +150,11 @@ function CallBody({ c }) {
       </div>
       <div className="tiles">
         <Tile label="Status" value={c.status_code} delta={c.finish_reason ? `finish: ${c.finish_reason}` : ""} />
-        <Tile label="Latency" value={`${fmtInt(c.latency_ms)} ms`} delta={c.ttft_ms ? `first token ${fmtInt(c.ttft_ms)} ms` : c.streamed ? "streamed" : ""} />
+        <Tile label="Latency" value={c.latency_ms ? `${fmtInt(c.latency_ms)} ms` : "–"}
+              delta={isWeb ? "not measured for web chats" : c.ttft_ms ? `first token ${fmtInt(c.ttft_ms)} ms` : c.streamed ? "streamed" : ""} />
         <Tile label="Tokens" value={fmtInt(c.input_tokens + c.output_tokens)} delta={`${fmtInt(c.input_tokens)} in · ${fmtInt(c.output_tokens)} out${c.usage_estimated ? " (estimated)" : ""}`} />
-        <Tile label="Cost" value={fmtUsd(c.cost_usd, 5)} delta={c.judge_cost_usd ? `+ judge ${fmtUsd(c.judge_cost_usd, 5)}` : ""} />
+        <Tile label="Cost" value={isWeb ? "–" : fmtUsd(c.cost_usd, 5)}
+              delta={isWeb ? "web chat, not billed per token" : c.judge_cost_usd ? `+ judge ${fmtUsd(c.judge_cost_usd, 5)}` : ""} />
         <Tile label="Adherence" value={c.adherence == null ? "–" : fmtPct(c.adherence)} delta={`${c.violations} rule violations`} />
         <Tile label="Relevance to prompt" value={c.relevance == null ? "–" : fmtNum(c.relevance)} delta="lexical overlap, 0–1" />
       </div>
@@ -151,7 +166,8 @@ function CallBody({ c }) {
           <Card title="User message" sub={c.n_messages > 1 ? `Last of ${c.n_messages} messages` : ""}>
             <div className="textblock">{c.last_user || "–"}</div>
           </Card>
-          <Card title={c.enforcement_action === "blocked" ? "Response (blocked, not returned to the app)" : "Response"}>
+          <Card title={c.enforcement_action === "blocked" ? "Response (blocked, not returned to the app)"
+            : c.enforcement_action === "corrected" ? "Response (auto-corrected before it reached the app)" : "Response"}>
             {c.error && c.enforcement_action !== "blocked" ? <div className="error-box small">{c.error}</div> : <div className="textblock">{c.response_text || "–"}</div>}
           </Card>
         </div>
@@ -163,7 +179,7 @@ function CallBody({ c }) {
                 <tbody>
                   {checks.map((x, i) => (
                     <tr key={i}>
-                      <td className="small">{x.label}<div className="muted">{x.source === "judge" ? "LLM judge" : x.source === "builtin" ? "built-in" : "rule"} · {x.severity}</div></td>
+                      <td className="small">{x.label}<div className="muted">{x.source === "judge" ? "LLM judge" : x.source === "builtin" ? "built-in" : "rule"}{x.severity !== "built-in" && ` · ${x.severity}`}</div></td>
                       <td>{x.skipped ? <span className="badge neutral">Skipped</span> : x.passed ? <span className="badge healthy">✓ Pass</span>
                         : <span className={`badge ${x.severity === "critical" ? "critical" : x.severity === "warning" ? "warning" : "neutral"}`}>✕ Fail</span>}</td>
                       <td className="small text-2">{x.detail}{x.score != null && ` (score ${x.score.toFixed(2)})`}</td>
@@ -180,15 +196,62 @@ function CallBody({ c }) {
                 <tbody>
                   {c.attempts.map((a, i) => (
                     <tr key={i}><td>{i + 1}</td><td className="small">{a.model}</td><td className="small">{humanize(a.result)}</td>
-                      <td className="small text-2">{(a.violations || []).join("; ") || a.detail || (a.status ? `HTTP ${a.status}` : "")}</td></tr>
+                      <td className="small text-2">{(a.fixes || []).join("; ") || (a.violations || []).join("; ") || a.detail || (a.status ? `HTTP ${a.status}` : "")}</td></tr>
                   ))}
                 </tbody>
               </table>
             </Card>
           )}
+          <FeedbackCard c={c} />
           {c.tags?.length > 0 && <Card title="Tags"><div className="row">{c.tags.map((t) => <span key={t} className="badge neutral">{t}</span>)}</div></Card>}
         </div>
       </div>
     </>
+  );
+}
+
+const VERDICTS = [
+  ["correct", "Flags are right", "The checks caught a real problem (or correctly found none)."],
+  ["false_positive", "False alarm", "A check failed, but the response was actually fine."],
+  ["missed", "Missed a problem", "The response was bad but no check caught it."],
+];
+
+/** Reviewer verdict on this call; feeds the per-check precision shown on Prompt contracts. */
+function FeedbackCard({ c }) {
+  const { can } = useAuth();
+  const mine = c.feedback?.find((f) => f.mine);
+  const [note, setNote] = useState(mine?.note || "");
+  const [busy, setBusy] = useState(false);
+  const send = async (verdict) => {
+    setBusy(true);
+    try {
+      await api(`/api/llm/calls/${c.id}/feedback`, { method: "POST", body: { verdict, note } });
+      toast.success("Thanks, feedback saved");
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Card title="Were the checks right?" sub="Your verdicts measure each check's real precision, so noisy rules can be tuned.">
+      {can("member") ? (
+        <div className="stack" style={{ gap: 10 }}>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            {VERDICTS.map(([v, label, hint]) => (
+              <button key={v} title={hint} disabled={busy} className={mine?.verdict === v ? "primary" : ""}
+                      aria-pressed={mine?.verdict === v} onClick={() => send(v)}>{label}</button>
+            ))}
+          </div>
+          <input type="text" placeholder="Optional note (what was wrong?)" value={note} maxLength={2000}
+                 onChange={(e) => setNote(e.target.value)} aria-label="Feedback note" />
+        </div>
+      ) : <div className="small muted">Viewers can see feedback but not add it.</div>}
+      {c.feedback?.filter((f) => !f.mine).length > 0 && (
+        <div className="small muted" style={{ marginTop: 8 }}>
+          Other reviewers: {c.feedback.filter((f) => !f.mine).map((f) => humanize(f.verdict)).join(", ")}
+        </div>
+      )}
+    </Card>
   );
 }

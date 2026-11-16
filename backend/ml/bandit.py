@@ -107,6 +107,9 @@ class Decision:
         }
 
 
+MIN_LEARNED_UPDATES = 20  # reviewed outcomes before the learned scores replace the playbook
+
+
 class LinUCBPolicy:
     def __init__(self, n_features: int = len(CONTEXT_NAMES), alpha: float = 1.0, ridge: float = 1.0):
         self.d = n_features
@@ -139,6 +142,14 @@ class LinUCBPolicy:
         x = build_context(assessment)
         allowed = self.allowed_actions(risk)
         scores = self.score(x, allowed)
+        if self.n_updates < MIN_LEARNED_UPDATES:
+            # Too few real outcomes to trust the learned scores: follow the playbook, keep learning.
+            action = STATIC_PLAYBOOK.get(assessment.get("failure_type") or "novel_anomaly", "human_review")
+            if action not in allowed:
+                action = "human_review"
+            return Decision(action, f"Playbook for this failure type. The learned policy takes over after "
+                                    f"{MIN_LEARNED_UPDATES} reviewed outcomes ({self.n_updates} so far).",
+                            scores, allowed, True)
         key = "ucb" if explore else "mean"
         action = max(allowed, key=lambda a: scores[a][key])
         if self.counts[action] == 0:

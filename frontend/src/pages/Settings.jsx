@@ -1,12 +1,15 @@
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { toast } from "sonner";
 import { api, useApi } from "../api";
 import { useAuth } from "../auth";
-import { Async, Card } from "../components/ui";
+import { Async, Card, useConfirm } from "../components/ui";
+import About from "./About";
+import { BillingTab } from "./Billing";
 import { fmtAgo } from "../format";
 
 const TABS = [
-  ["workspace", "Workspace"], ["members", "Members"], ["api-keys", "API keys"], ["providers", "Provider keys"],
+  ["about", "About & how tracking works"], ["workspace", "Workspace"], ["members", "Members"], ["api-keys", "API keys"], ["providers", "Provider keys"], ["billing", "Plan & billing"],
   ["privacy", "Privacy & judge"], ["account", "Account"],
 ];
 const PROVIDER_LABEL = { openai: "OpenAI", anthropic: "Anthropic (Claude)", gemini: "Google Gemini" };
@@ -17,14 +20,14 @@ function useAction() {
     setMsg(null);
     try {
       const r = await fn();
-      if (ok) setMsg({ ok: true, text: typeof ok === "function" ? ok(r) : ok });
+      if (ok) toast.success(typeof ok === "function" ? ok(r) : ok);
       return r;
     } catch (e) {
       setMsg({ ok: false, text: e.message });
       return null;
     }
   };
-  const view = msg && <div className={msg.ok ? "note small" : "error-box small"} style={{ marginTop: 10 }}>{msg.text}</div>;
+  const view = msg && <div className="error-box small" style={{ marginTop: 10 }}>{msg.text}</div>;
   return [run, view];
 }
 
@@ -39,10 +42,12 @@ export default function Settings() {
           <button key={id} className={tab === id ? "on" : ""} onClick={() => setParams({ tab: id })}>{label}</button>
         ))}
       </div>
+      {tab === "about" && <About />}
       {tab === "workspace" && <WorkspaceTab />}
       {tab === "members" && <MembersTab />}
       {tab === "api-keys" && <ApiKeysTab />}
       {tab === "providers" && <ProvidersTab />}
+      {tab === "billing" && <BillingTab />}
       {tab === "privacy" && <PrivacyTab />}
       {tab === "account" && <AccountTab />}
     </>
@@ -77,6 +82,7 @@ function WorkspaceTab() {
 }
 
 function MembersTab() {
+  const confirm = useConfirm();
   const { can, user } = useAuth();
   const members = useApi("/api/workspace/members");
   const [email, setEmail] = useState("");
@@ -103,7 +109,10 @@ function MembersTab() {
                     </td>
                     <td className="small">{fmtAgo(m.last_login_at)}</td>
                     <td className="r">{can("admin") && m.user_id !== user.id && (
-                      <button onClick={() => act(() => api(`/api/workspace/members/${m.user_id}`, { method: "DELETE" }))}>Remove</button>)}</td>
+                      <button onClick={async () => {
+                        if (await confirm({ title: `Remove ${m.email}?`, body: "They lose access to this workspace immediately.", confirmLabel: "Remove", danger: true }))
+                          act(() => api(`/api/workspace/members/${m.user_id}`, { method: "DELETE" }));
+                      }}>Remove</button>)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -132,6 +141,7 @@ function MembersTab() {
 }
 
 function ApiKeysTab() {
+  const confirm = useConfirm();
   const { can } = useAuth();
   const keys = useApi("/api/workspace/api-keys");
   const [name, setName] = useState("");
@@ -150,7 +160,10 @@ function ApiKeysTab() {
                     <td>{k.name}</td><td className="mono">{k.prefix}…</td>
                     <td className="small">{fmtAgo(k.created_at)}</td><td className="small">{k.last_used_at ? fmtAgo(k.last_used_at) : "Never"}</td>
                     <td className="r">{k.revoked ? <span className="badge neutral">Revoked</span> : can("member") && (
-                      <button onClick={() => run(async () => { await api(`/api/workspace/api-keys/${k.id}`, { method: "DELETE" }); keys.reload(); })}>Revoke</button>)}</td>
+                      <button onClick={async () => {
+                        if (await confirm({ title: `Revoke “${k.name}”?`, body: "Apps and the browser extension using this key stop working immediately. This cannot be undone.", confirmLabel: "Revoke", danger: true }))
+                          run(async () => { await api(`/api/workspace/api-keys/${k.id}`, { method: "DELETE" }); }, "API key revoked");
+                      }}>Revoke</button>)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -180,6 +193,7 @@ function ApiKeysTab() {
 }
 
 function ProvidersTab() {
+  const confirm = useConfirm();
   const { can } = useAuth();
   const creds = useApi("/api/workspace/credentials");
   const [form, setForm] = useState({ provider: "openai", name: "default", api_key: "" });
@@ -212,7 +226,10 @@ function ProvidersTab() {
                       {tests[c.id] && <span className={`small ${tests[c.id].ok ? "" : "text-2"}`} style={{ marginRight: 8, color: tests[c.id].ok ? "var(--good-text)" : undefined }}>{tests[c.id].text}</span>}
                       {can("admin") && <>
                         <button onClick={() => test(c.id)}>Test</button>{" "}
-                        <button onClick={() => run(async () => { await api(`/api/workspace/credentials/${c.id}`, { method: "DELETE" }); creds.reload(); })}>Delete</button>
+                        <button onClick={async () => {
+                          if (await confirm({ title: `Delete the ${PROVIDER_LABEL[c.provider]} key “${c.name}”?`, body: "Gateway calls, drift tests and the judge that use it will fail until you add another key.", confirmLabel: "Delete", danger: true }))
+                            run(async () => { await api(`/api/workspace/credentials/${c.id}`, { method: "DELETE" }); }, "Provider key deleted");
+                        }}>Delete</button>
                       </>}
                     </td>
                   </tr>

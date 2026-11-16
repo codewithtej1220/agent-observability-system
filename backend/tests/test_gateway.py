@@ -45,7 +45,10 @@ class Gateway:
 def gw(new_user):
     from app.llm import upstream
 
+    from conftest import set_plan
+
     dash, _ = new_user()
+    set_plan(dash, "pro")
     key = dash.post("/api/workspace/api-keys", json={"name": "app"}).json()["key"]
     for provider, secret in (("openai", OPENAI_KEY), ("anthropic", ANTHROPIC_KEY), ("gemini", GEMINI_KEY)):
         assert dash.post("/api/workspace/credentials", json={"provider": provider, "api_key": secret}).status_code == 200
@@ -287,3 +290,28 @@ def test_browser_extension_turns(gw):
 
     bad = gw.http.post("/api/llm/ingest/browser-turn", json={**turn, "app": "myspace-web"}, headers={"X-API-Key": gw.key})
     assert bad.status_code == 422
+
+
+def test_upstream_timeout_returns_504_and_is_logged(gw):
+    import httpx
+
+    def hang(request, body):
+        raise httpx.ReadTimeout("provider too slow", request=request)
+
+    gw.mock.reply = hang
+    r = gw.gemini("gemini-3.8-flash", {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]})
+    assert r.status_code == 504
+    assert "did not respond" in r.json()["error"]["message"] and r.headers["x-aobs-call-id"]
+    call = gw.last_call()
+    assert call["status_code"] == 504 and call["model"] == "gemini-3.8-flash" and "did not respond" in call["error"]
+
+
+def test_unreachable_provider_returns_502(gw):
+    import httpx
+
+    def down(request, body):
+        raise httpx.ConnectError("no route", request=request)
+
+    gw.mock.reply = down
+    r = gw.openai(CHAT)
+    assert r.status_code == 502 and "Could not reach openai" in r.json()["error"]["message"]

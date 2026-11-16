@@ -44,7 +44,7 @@ class RunStartIn(BaseModel):
 
 class RunIn(RunStartIn):
     steps: List[StepIn]
-    # Optional ground truth, used only by the simulator for evaluation.
+    # Optional known label (e.g. replayed public traces); never used by the models.
     source_label: Optional[str] = None
     failure_onset: Optional[int] = None
 
@@ -72,3 +72,4 @@ class AssessmentOut(BaseModel):
     action_reason: str
     first_flag_step: Optional[int]
     model_version: str
+    correction: Optional[Dict[str, Any]] = None  # message to inject for reflect / retry / escalate

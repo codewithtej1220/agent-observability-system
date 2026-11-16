@@ -39,3 +39,8 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 *.log
+
+# Build artifacts
+brag-output/
+backend/migrations/
+*.db-journal

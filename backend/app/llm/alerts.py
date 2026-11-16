@@ -25,9 +25,11 @@ from urllib.parse import urlparse
 import numpy as np
 from sqlalchemy.orm import Session
 
+from .. import plans
 from ..config import get_settings
 from ..orm import Workspace, utcnow
 from ..orm_llm import EVENT_METRICS, WINDOW_METRICS, AlertEvent, AlertRule, LLMCall
+from ..realtime import broker
 from .upstream import client
 
 log = logging.getLogger(__name__)
@@ -95,11 +97,14 @@ def _send_email(to: List[str], subject: str, body: str) -> None:
         smtp.send_message(msg)
 
 
-async def deliver(rule: Optional[AlertRule], event: AlertEvent) -> List[Dict]:
+async def deliver(rule: Optional[AlertRule], event: AlertEvent, allowed: tuple = ("slack", "webhook", "email")) -> List[Dict]:
     if rule is None:
         return []
     results = []
-    ch = rule.channels or {}
+    ch = {k: v for k, v in (rule.channels or {}).items() if k in allowed}
+    for k in (rule.channels or {}):
+        if k not in allowed:
+            results.append({"channel": k, "ok": False, "error": "Not included in the current plan"})
     link = _link(event.ref_type, event.ref_id)
     text = f"[{event.severity.upper()}] {event.title}\n{event.message}\n{link}"
     payload = {"id": event.id, "title": event.title, "message": event.message, "severity": event.severity,
@@ -132,7 +137,10 @@ async def fire(db: Session, ws_id: int, rule: Optional[AlertRule], title: str, m
     if rule is not None:
         rule.last_fired_at = utcnow()
     db.commit()
-    ev.notified = await deliver(rule, ev)
+    broker.publish(ws_id, "alert", {"id": ev.id, "title": ev.title, "severity": ev.severity, "ref_type": ref_type,
+                                    "ref_id": ref_id})
+    ws = db.get(Workspace, ws_id)
+    ev.notified = await deliver(rule, ev, plans.plan_of(ws).channels if ws else ())
     db.commit()
     return ev
 

@@ -29,6 +29,9 @@ class Contract(Base):
     max_repairs: Mapped[int] = mapped_column(Integer, default=1)
     fallback_models: Mapped[list] = mapped_column(JSON, default=list)  # same-provider models, in order
     judge_in_enforcement: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Deterministic corrections tried before asking the model to repair (enforcing modes only).
+    auto_redact: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    auto_fix_json: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -165,3 +168,21 @@ class DriftRun(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     response_text: Mapped[str] = mapped_column(Text, default="")
     detail: Mapped[str] = mapped_column(Text, default="")
+
+
+FEEDBACK_VERDICTS = ("correct", "false_positive", "missed")
+
+
+class CallFeedback(Base):
+    """A reviewer's verdict on a call's flags; used to measure each check's real precision."""
+
+    __tablename__ = "call_feedback"
+    __table_args__ = (UniqueConstraint("call_id", "user_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    call_id: Mapped[str] = mapped_column(ForeignKey("llm_calls.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(Integer)
+    verdict: Mapped[str] = mapped_column(String(20))  # correct | false_positive | missed
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

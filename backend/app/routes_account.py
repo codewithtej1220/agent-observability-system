@@ -12,7 +12,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
-from . import crypto
+from . import crypto, plans
 from .auth import (
     CSRF_HEADER, CSRF_VALUE, Ctx, create_session, demo_workspace, end_session, hash_password, login_throttle,
     new_api_key, require_user, role, sha256, validate_password, verify_password,
@@ -63,7 +63,9 @@ def _me(db: Session, ctx: Ctx) -> Dict[str, Any]:
     return {
         "user": {"id": ctx.user.id, "email": ctx.user.email, "name": ctx.user.name,
                  "has_password": bool(ctx.user.password_hash), "google_linked": bool(ctx.user.google_sub)},
-        "workspace": {"id": ctx.workspace.id, "name": ctx.workspace.name, "role": ctx.role},
+        "workspace": {"id": ctx.workspace.id, "name": ctx.workspace.name, "role": ctx.role,
+                      "plan": plans.plan_of(ctx.workspace).id, "plan_status": ctx.workspace.plan_status or "active"},
+        "is_platform_admin": ctx.user.email.lower() in get_settings().platform_admin_list,
         "workspaces": [{"id": w.id, "name": w.name, "role": m.role} for m, w in rows],
     }
 
@@ -139,7 +141,7 @@ def switch_workspace(body: SwitchIn, ctx: Ctx = Depends(require_user), db: Sessi
                                     Membership.workspace_id == body.workspace_id).first()
     if m is None:
         raise HTTPException(404, "Workspace not found")
-    ctx.session.workspace_id = body.workspace_id
+    ctx.session.workspace_id = ctx.user.last_workspace_id = body.workspace_id
     db.commit()
     return {"ok": True}
 
@@ -252,7 +254,7 @@ def create_workspace(body: WorkspaceIn, ctx: Ctx = Depends(require_user), db: Se
     db.add(ws)
     db.flush()
     db.add(Membership(user_id=ctx.user.id, workspace_id=ws.id, role="admin"))
-    ctx.session.workspace_id = ws.id
+    ctx.session.workspace_id = ctx.user.last_workspace_id = ws.id
     db.commit()
     return {"id": ws.id, "name": ws.name}
 
@@ -279,6 +281,8 @@ def update_workspace(body: SettingsIn, ctx: Ctx = Depends(role("admin")), db: Se
     data = body.model_dump(exclude_unset=True)
     if "name" in data:
         ctx.workspace.name = data.pop("name").strip()
+    if data.get("auto_judge") or data.get("judge_credential_id") is not None:
+        plans.require_feature(ctx.workspace, "judge")
     if data.get("judge_credential_id") is not None:
         cred = db.get(ProviderCredential, data["judge_credential_id"])
         if cred is None or cred.workspace_id != ctx.workspace_id:
@@ -314,6 +318,7 @@ def add_member(body: MemberIn, ctx: Ctx = Depends(role("admin")), db: Session = 
         raise HTTPException(404, "No account with this email. Ask them to sign up first, then add them.")
     if db.query(Membership).filter(Membership.user_id == user.id, Membership.workspace_id == ctx.workspace_id).first():
         raise HTTPException(409, "Already a member")
+    plans.check_count(db, ctx.workspace, "seats", plans.seats_used(db, ctx.workspace_id))
     db.add(Membership(user_id=user.id, workspace_id=ctx.workspace_id, role=body.role))
     db.commit()
     return {"ok": True}

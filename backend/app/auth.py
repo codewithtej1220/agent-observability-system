@@ -39,7 +39,8 @@ SESSION_COOKIE = "aobs_session"
 CSRF_HEADER = "x-requested-with"
 CSRF_VALUE = "aobs"
 API_KEY_PREFIX = "aobs_"
-DEMO_WORKSPACE_NAME = "Demo workspace"
+DEMO_WORKSPACE_NAME = "Main workspace"
+LEGACY_WORKSPACE_NAMES = ("Demo workspace",)   # earlier name of the same workspace
 ROLE_RANK = {"viewer": 0, "member": 1, "admin": 2}
 
 _hasher = PasswordHasher()
@@ -121,8 +122,13 @@ def create_session(db: Session, user: User, response: Response, request: Request
     s = get_settings()
     token = secrets.token_urlsafe(32)
     if workspace_id is None:
-        m = db.query(Membership).filter(Membership.user_id == user.id).order_by(Membership.id).first()
-        workspace_id = m.workspace_id if m else None
+        # Sign in to the workspace used last (if still a member), else the first one joined.
+        member_of = {m.workspace_id for m in db.query(Membership).filter(Membership.user_id == user.id)}
+        if user.last_workspace_id in member_of:
+            workspace_id = user.last_workspace_id
+        else:
+            m = db.query(Membership).filter(Membership.user_id == user.id).order_by(Membership.id).first()
+            workspace_id = m.workspace_id if m else None
     sess = UserSession(token_hash=sha256(token), user_id=user.id, workspace_id=workspace_id,
                        expires_at=utcnow() + timedelta(days=s.session_days),
                        user_agent=(request.headers.get("user-agent") or "")[:300])
@@ -179,7 +185,9 @@ def extract_api_key(request: Request) -> Optional[str]:
 
 
 def demo_workspace(db: Session) -> Optional[Workspace]:
-    return db.query(Workspace).filter(Workspace.name == DEMO_WORKSPACE_NAME).order_by(Workspace.id).first()
+    """The platform owner's first workspace (the dev key and the first sign-up use it)."""
+    return (db.query(Workspace).filter(Workspace.name.in_((DEMO_WORKSPACE_NAME, *LEGACY_WORKSPACE_NAMES)))
+            .order_by(Workspace.id).first())
 
 
 def _api_key_ctx(key: str, db: Session) -> Optional[Ctx]:
@@ -212,6 +220,8 @@ def require_access(request: Request, db: Session = Depends(get_db)) -> Ctx:
         ctx = _api_key_ctx(key, db)
         if ctx is None:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or revoked API key")
+        from .plans import check_rate  # local: plans imports the ORM, which auth also uses
+        check_rate(ctx.workspace)
         return ctx
     raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Sign in or provide an API key")
 

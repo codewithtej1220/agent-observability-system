@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { QueryClient, useQuery } from "@tanstack/react-query";
 
 // Same-origin by default: the dev server and nginx proxy /api to the backend.
 const BASE = import.meta.env.VITE_API_BASE || "";
@@ -9,6 +9,16 @@ export class ApiError extends Error {
     this.status = status;
   }
 }
+
+export const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 10_000,               // revisiting a page shows cached data instantly
+      refetchOnWindowFocus: true,
+      retry: (n, err) => (err?.status === 0 || err?.status >= 500) && n < 2,
+    },
+  },
+});
 
 export async function api(path, { method = "GET", body } = {}) {
   const url = `${BASE}${path}`;
@@ -35,35 +45,22 @@ export async function api(path, { method = "GET", body } = {}) {
       } else detail = j.error?.message || detail;
     } catch { /* not JSON */ }
     if (res.status === 401) window.dispatchEvent(new Event("aobs:unauthorized"));
+    if (res.status === 402) window.dispatchEvent(new CustomEvent("aobs:plan-limit", { detail }));
     throw new ApiError(res.status, detail);
   }
-  return res.json();
+  const data = await res.json();
+  // Any successful change can affect any page: refresh what is on screen.
+  if (method !== "GET") queryClient.invalidateQueries({ queryKey: ["api"] });
+  return data;
 }
 
-/** Fetch `path` (re-fetching when it changes, and every `refreshMs` if set). */
+/** Fetch `path` (cached; re-fetched every `refreshMs` if set). */
 export function useApi(path, { refreshMs = 0 } = {}) {
-  const [state, setState] = useState({ data: null, error: null, loading: true });
-  const current = useRef(path);
-  current.current = path;
-
-  const load = useCallback(async () => {
-    if (!path) return;
-    try {
-      const data = await api(path);
-      if (current.current === path) setState({ data, error: null, loading: false });
-    } catch (error) {
-      if (current.current === path) setState((s) => ({ ...s, error, loading: false }));
-    }
-  }, [path]);
-
-  useEffect(() => {
-    // A different request: drop the previous result so it is never shown under new filters.
-    setState({ data: null, error: null, loading: true });
-    load();
-    if (!refreshMs) return undefined;
-    const id = setInterval(load, refreshMs);
-    return () => clearInterval(id);
-  }, [load, refreshMs]);
-
-  return { ...state, reload: load };
+  const q = useQuery({
+    queryKey: ["api", path],
+    queryFn: () => api(path),
+    enabled: !!path,
+    refetchInterval: refreshMs || false,
+  });
+  return { data: q.data ?? null, error: q.error, loading: q.isPending && !!path, fetching: q.isFetching, reload: q.refetch };
 }

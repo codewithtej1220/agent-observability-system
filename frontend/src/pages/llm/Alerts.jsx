@@ -2,7 +2,8 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api, useApi } from "../../api";
 import { useAuth } from "../../auth";
-import { Async, Card, Segmented } from "../../components/ui";
+import { toast } from "sonner";
+import { Async, Card, Segmented, useConfirm } from "../../components/ui";
 import { fmtAgo, fmtTime } from "../../format";
 
 const EMPTY_RULE = { name: "", metric: "violation_rate", comparison: ">", threshold: 0.1, window_minutes: 60, min_calls: 10,
@@ -16,6 +17,7 @@ export default function Alerts() {
   const metrics = useApi("/api/llm/alert-metrics");
   const { can } = useAuth();
   const [editing, setEditing] = useState(null);
+  const confirm = useConfirm();
 
   const setEvent = async (id, s) => { await api(`/api/llm/alerts/${id}`, { method: "PATCH", body: { status: s } }); events.reload(); };
 
@@ -78,9 +80,22 @@ export default function Alerts() {
                     <td className="small">{r.last_fired_at ? fmtAgo(r.last_fired_at) : "Never"}</td>
                     <td className="r" style={{ whiteSpace: "nowrap" }}>
                       {can("member") && <>
-                        <button onClick={async () => { const t = await api(`/api/llm/alert-rules/${r.id}/test`, { method: "POST" }); window.alert(t.notified.length ? t.notified.map((n) => `${n.channel}: ${n.ok ? "sent" : n.error || n.status}`).join("\n") : "Test alert created (in-app only)."); events.reload(); }}>Test</button>{" "}
+                        <button onClick={async () => {
+                          try {
+                            const t = await api(`/api/llm/alert-rules/${r.id}/test`, { method: "POST" });
+                            const failed = t.notified.filter((n) => !n.ok);
+                            if (!t.notified.length) toast.success("Test alert created (in-app only)");
+                            else if (failed.length) toast.error(`Delivery failed: ${failed.map((n) => `${n.channel} (${n.error || n.status})`).join(", ")}`);
+                            else toast.success(`Test sent to ${t.notified.map((n) => n.channel).join(", ")}`);
+                          } catch (e) { toast.error(e.message); }
+                        }}>Test</button>{" "}
                         <button onClick={() => setEditing(r)}>Edit</button>{" "}
-                        <button onClick={async () => { if (window.confirm(`Delete "${r.name}"?`)) { await api(`/api/llm/alert-rules/${r.id}`, { method: "DELETE" }); rules.reload(); } }}>Delete</button>
+                        <button onClick={async () => {
+                          if (await confirm({ title: `Delete alert rule “${r.name}”?`, body: "Past alerts stay in the list. This cannot be undone.", confirmLabel: "Delete", danger: true })) {
+                            await api(`/api/llm/alert-rules/${r.id}`, { method: "DELETE" });
+                            toast.success("Alert rule deleted");
+                          }
+                        }}>Delete</button>
                       </>}
                     </td>
                   </tr>
@@ -108,6 +123,7 @@ function RuleForm({ initial, metrics, onClose, onSaved }) {
       channels: { slack: r.slack || undefined, webhook: r.webhook || undefined, email: r.email ? r.email.split(",").map((s) => s.trim()).filter(Boolean) : [] } };
     try {
       await api(initial.id ? `/api/llm/alert-rules/${initial.id}` : "/api/llm/alert-rules", { method: initial.id ? "PATCH" : "POST", body });
+      toast.success(initial.id ? "Alert rule updated" : "Alert rule created");
       onSaved();
     } catch (e) { setErr(e.message); }
   };

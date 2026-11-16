@@ -39,6 +39,7 @@ class User(Base):
     google_sub: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_workspace_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # signed back in here
 
 
 class Workspace(Base):
@@ -48,6 +49,15 @@ class Workspace(Base):
     name: Mapped[str] = mapped_column(String(200))
     settings: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    # Subscription (see app/plans.py). Limits come from plans.plan_of(), never read these directly.
+    plan: Mapped[str] = mapped_column(String(20), default="free", server_default="free")
+    plan_status: Mapped[str] = mapped_column(String(20), default="active", server_default="active")
+    trial_ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    trial_used: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    stripe_customer_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    stripe_subscription_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    current_period_end: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     def setting(self, key: str):
         return (self.settings or {}).get(key, DEFAULT_WORKSPACE_SETTINGS.get(key))
@@ -179,7 +189,7 @@ class RunRecord(Base):
     decision: Mapped[dict] = mapped_column(JSON, default=dict)
     policy_context: Mapped[list] = mapped_column(JSON, default=list)
 
-    # Ground truth when traffic comes from the simulator (never shown to models).
+    # Known label when the run is a replayed public trace (never shown to models).
     source_label: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     failure_onset: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
@@ -259,3 +269,39 @@ class PolicyEvent(Base):
     reward: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     rewarded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+# ============================================================================
+# Subscriptions and operations
+# ============================================================================
+
+class UsageCounter(Base):
+    """Monthly usage per workspace and metric (llm_calls, agent_runs, llm_calls_unanalyzed)."""
+
+    __tablename__ = "usage_counters"
+
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    period: Mapped[str] = mapped_column(String(7), primary_key=True)  # YYYY-MM
+    metric: Mapped[str] = mapped_column(String(40), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class BillingEvent(Base):
+    """Processed Stripe webhook events, so a redelivered event is applied only once."""
+
+    __tablename__ = "billing_events"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    type: Mapped[str] = mapped_column(String(80))
+    workspace_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class JobLease(Base):
+    """Lets exactly one API process run the background jobs at a time."""
+
+    __tablename__ = "job_leases"
+
+    name: Mapped[str] = mapped_column(String(40), primary_key=True)
+    holder: Mapped[str] = mapped_column(String(80))
+    expires_at: Mapped[datetime] = mapped_column(DateTime)

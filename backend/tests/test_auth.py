@@ -139,3 +139,31 @@ def test_google_sign_in(client, monkeypatch):
     ok = c.get("/api/auth/google/callback", params={"code": "auth-code", "state": state})
     assert ok.status_code == 302 and ok.headers["location"].endswith("/")
     assert c.get("/api/auth/me").json()["user"]["email"] == "gina@example.com"
+
+
+def test_login_returns_to_last_used_workspace(new_user):
+    c, email = new_user(password="correct-horse-9")
+    first = c.get("/api/auth/me").json()["workspace"]["id"]
+    second = c.post("/api/workspaces", json={"name": "Second"}).json()["id"]   # creating also switches
+    c.post("/api/auth/switch-workspace", json={"workspace_id": first})
+    c.post("/api/auth/switch-workspace", json={"workspace_id": second})
+    c.post("/api/auth/logout")
+    assert c.post("/api/auth/login", json={"email": email, "password": "correct-horse-9"}).status_code == 200
+    assert c.get("/api/auth/me").json()["workspace"]["id"] == second
+
+
+def test_native_host_protocol_status():
+    """The extension's auto-start helper answers a framed JSON message (read-only 'status' command)."""
+    import json
+    import struct
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    host = Path(__file__).resolve().parents[2] / "browser-extension" / "native-host" / "host.py"
+    msg = json.dumps({"cmd": "status"}).encode()
+    out = subprocess.run([sys.executable, str(host)], input=struct.pack("<I", len(msg)) + msg,
+                         capture_output=True, timeout=60).stdout
+    (n,) = struct.unpack("<I", out[:4])
+    reply = json.loads(out[4:4 + n])
+    assert reply["ok"] is True and {"api", "dashboard"} <= set(reply)

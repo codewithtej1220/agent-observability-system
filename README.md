@@ -51,11 +51,11 @@ flowchart LR
 - **Accounts & Workspaces** - Email/password and Google sign-in, roles (admin/member/viewer), per-workspace API keys, provider keys encrypted at rest
 - **Real-time Detection** - Catches failures as they happen, not after
 - **Multi-Layer ML** - Rules + Unsupervised + Supervised models working together
-- **Early Alerts** - Detects issues 1-2 steps after onset (89% of the time)
+- **Early Alerts** - Flags 74% of failing real agent runs within 2 steps of onset
 - **Smart Interventions** - RL policy learns which actions work best
 - **Rich Dashboard** - Full observability with graphs, heatmaps, and flow diagrams
 - **Continuous Learning** - Gets smarter from human feedback
-- **Cost Savings** - Prevents up to 70% of wasted tokens in failing runs
+- **Cost Savings** - Flags failing runs early enough to avoid 71% of their tokens (on real traces)
 - **Fail-Safe Design** - Agents keep running even if monitoring is down
 - **Easy Integration** - Simple Python SDK with no heavy dependencies
 - **Production Ready** - Docker support, PostgreSQL/SQLite, comprehensive tests
@@ -91,36 +91,52 @@ classifier uncertainty (active learning), so each label is as informative as pos
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design rationale and data model.
 
-## Results (simulated reference data)
+## Results (real agent runs)
 
-Measured on 1,500 held-out simulated runs (≈25% failing) that were never used for training.
-The simulator deliberately includes healthy behavior that looks like failure (pagination,
-polling a job until it finishes, retry after a transient error, productive A↔B alternation).
-**Expect lower numbers on real traffic** — the review queue and retraining are how the models
-adapt to it.
+Trained and evaluated on real agent runs: [SWE-agent trajectories](https://huggingface.co/datasets/nebius/SWE-agent-trajectories)
+(CC BY 4.0), Llama-based SWE-agent models trying to resolve real GitHub issues. Two shards, ~13,000 runs,
+7,508 of them labeled. The split is by GitHub issue, so no test run shares an issue with training.
 
-| | Precision | Recall | False-positive rate | Caught ≤ 2 steps after onset | Avoidable tokens flagged |
-|---|---|---|---|---|---|
-| Fused engine (v1) | 97.3% | 98.1% | 0.9% | 89% | 70% of failing-run tokens |
+Labels come from what actually happened in each run (`ml/real_traces.py`), with the step where it started:
 
-**Each paradigm alone vs fused** (recall at 5% FPR): rules 0%, unsupervised 56%, supervised 100%, fused 100%.
+| Label | What happened in the run |
+|---|---|
+| Hallucinated tool | the agent ran a command that does not exist (the environment answered "command not found") |
+| Loop | the same command, with the same output, three times in a row |
+| Tool thrashing | 10+ navigation/search commands across 4+ tools with no edit or execution, in a failed run |
+| Token waste | the run exhausted its context/cost budget without resolving the issue |
+| Healthy | the issue was resolved and none of the above happened |
 
-**The case that matters in production — a failure type never seen in training** (leave-one-type-out):
+These are behavioral labels, not human judgments; labels from the review queue are added on top
+(weighted higher) and retrain the model on your own agents.
+
+Measured on 1,500 held-out real runs (62% failing):
+
+| | Precision | Recall | Macro-F1 (5 classes) | Healthy runs ever flagged | Caught ≤ 2 steps after onset | Avoidable tokens flagged |
+|---|---|---|---|---|---|---|
+| Fused engine (v1) | 91.3% | 96.5% | 0.73 | 21% | 74% | 71% of failing-run tokens |
+
+Per class (F1): healthy 0.89, loop 0.77, token waste 0.72, tool thrashing 0.67, hallucinated tool 0.60.
+
+**Each paradigm alone vs fused** (recall at 5% FPR): rules 64%, unsupervised 76%, supervised 73%, **fused 77%**
+(PR-AUC 0.90 / 0.96 / 0.97 / **0.97**).
+
+**A failure type never seen in training** (leave-one-type-out):
 
 | Held-out type | Rules only | Unsupervised only | Supervised only | **Fused** |
 |---|---|---|---|---|
-| Loop | 83% @ 24% FPR | 99% @ 30% FPR | 17% @ 0% FPR | **59% @ 1.3% FPR** |
-| Tool thrashing | 45% @ 24% | 99% @ 30% | 82% @ 0.1% | **84% @ 1.7%** |
-| Hallucinated tool | 100% @ 24% | 59% @ 28% | 37% @ 0% | **100% @ 1.1%** |
-| Token waste | 68% @ 24% | 96% @ 30% | 89% @ 0% | **89% @ 1.0%** |
+| Loop | 100% @ 64% FPR | 100% @ 30% FPR | 86% @ 13% FPR | **88% @ 15% FPR** |
+| Tool thrashing | 82% @ 64% | 95% @ 34% | 62% @ 6% | **64% @ 7%** |
+| Hallucinated tool | 98% @ 64% | 90% @ 28% | 75% @ 10% | **78% @ 12%** |
+| Token waste | 94% @ 64% | 98% @ 32% | 82% @ 13% | **93% @ 17%** |
 
-A supervised model alone confidently calls unfamiliar failures "healthy"; rules and novelty
-alone flag a quarter of healthy runs. Combined, they keep false positives near 1% while
-recovering most of the lost recall.
+Real agents are noisy: false-positive rates are far higher than on simulated data, and rules alone
+flag most healthy runs. Fusion keeps most of the recall at a fraction of the false positives.
 
-**Intervention policy** (average reward over 4,000 simulated decisions; oracle = upper bound
-that knows the true failure): LinUCB **0.58**, hand-written playbook 0.41, always page a human
-0.37, random 0.35, oracle 0.65.
+**Intervention policy.** No public dataset records what happened *after* an intervention, so the
+policy starts from zero: it follows a failure-type playbook (loop → retry the step, tool thrashing
+→ human review, hallucinated tool → stronger model, token waste → stop) until it has learned from
+20 reviewed outcomes, then the LinUCB bandit takes over and keeps learning from every review.
 
 All of these numbers are regenerated by `python -m scripts.bootstrap` and shown on the
 dashboard's **Detection models** and **Intervention policy** pages.
@@ -141,8 +157,9 @@ cd backend
 # Install dependencies
 pip install -r requirements.txt
 
-# Bootstrap: train models + seed demo data (~2-3 minutes)
-python -m scripts.bootstrap
+# Download the real agent traces (~184 MB, once), then train on them (~10 minutes)
+python -m scripts.fetch_real_traces
+python -m scripts.bootstrap                     # add --import-runs 400 to show held-out real runs on the dashboard
 
 # Start API server
 uvicorn app.main:app --reload --port 8000
@@ -164,13 +181,14 @@ npm run dev
 
 **Access the application:**
 - Dashboard: http://localhost:5173 → **Create an account**. The first account becomes admin of the
-  seeded *Demo workspace* (simulated agent runs and LLM calls); later sign-ups get their own workspace.
+  *Main workspace*; later sign-ups get their own workspace. Dashboards fill with your own traffic (gateway,
+  browser extension, SDK). Nothing is simulated.
 - API Docs: http://localhost:8000/docs
 - Health Check: http://localhost:8000/health
 
 **Stream Live Traffic (optional):**
 ```bash
-# Run simulated agent traffic
+# Replay held-out real agent runs step by step, as if live
 python sdk/examples/live_traffic.py --runs 30
 ```
 
@@ -272,17 +290,70 @@ with client.run("support-bot", task=user_message) as run:
                                 input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
         if verdict and verdict.should_stop:          # terminate / human_review
             break
-        if verdict and verdict.action == "reflect":
-            messages.append(REFLECTION_PROMPT)       # e.g. "You are repeating the same call..."
+        if verdict and verdict.correction_prompt:    # reflect / retry_step / escalate_model
+            messages.append({"role": "user", "content": verdict.correction_prompt})
     run.final_answer(answer)
 
 # Later, once the outcome is known (closes the learning loop):
 client.feedback(run.run_id, label="healthy", resolved=True)
 ```
 
+`correction_prompt` is written from the detector evidence, e.g. *"You are repeating the same
+actions without making progress. - search_kb called 4 times with identical arguments (steps 6–9).
+Do not repeat a tool call with the same arguments…"*. The run page shows the same text.
+
 The client fails open: if the service is unreachable, the agent keeps running.
-In development, `dev-local-key` also works and maps to the Demo workspace (disabled when
+In development, `dev-local-key` also works and maps to the Main workspace (disabled when
 `AOBS_ENVIRONMENT=production` and in Docker Compose).
+
+## Detection and correction
+
+Detection runs on every call and every agent step; correction depends on what failed:
+
+| Where | Detected | Corrected by |
+|---|---|---|
+| LLM gateway, `block`/`repair` contracts | Personal data in the answer (`no_pii`) | Masking it in the provider's own response format, streamed or not; no extra model call |
+| | JSON wrapped in prose or a code fence (`json_valid`, `json_schema`) | Extracting the JSON value |
+| | Any other critical rule | `repair`: the model is asked to fix its answer, then fallback models; else blocked (HTTP 422) |
+| Any LLM call | Unusual output length, latency or relevance *for that model* (robust z-score vs. the model's last 500 calls) | Reported as "Unusual for this model" |
+| Agent runs | Loops, tool thrashing, hallucinated tools, token waste, novel anomalies | A correction prompt for `reflect` / `retry_step` / `escalate_model`; `terminate` / `human_review` stop the run |
+
+A deterministic correction is only used if the corrected text passes every critical rule when
+checked again; the call log shows "Auto-corrected" with the fixes applied. Both corrections can be
+switched off per contract. Reviewers can mark any call's flags as right, a false alarm, or a missed
+problem; Prompt contracts then shows each check's measured precision.
+
+## Plans and subscriptions
+
+Every workspace has a plan. New workspaces start on Free; the demo workspace (and any workspace a
+platform admin assigns) is on the unlimited internal plan.
+
+| | Free | Pro ($5/mo) |
+|---|---|---|
+| Tracked LLM calls / month | 5,000 | 50,000 |
+| Agent runs / month | 1,000 | 20,000 |
+| Members | 2 | 5 |
+| Prompt contracts / alert rules / drift tests | 2 / 3 / 1 | 10 / 20 / 5 |
+| Content retention | 7 days | 30 days |
+| LLM judge; block, repair and auto-correct | – | ✓ |
+| Slack, webhook and email alerts | in-app only | ✓ |
+
+Pro has a one-time 14-day free trial. Limits never break a customer's app: over the monthly
+quota or the per-minute rate limit, the gateway still forwards every request and only skips
+analysis (response header `x-aobs-analysis: skipped-quota`), and the workspace gets one in-app
+alert. Analysis-only endpoints (agent ingest, browser extension) return 402 / 429, and the SDK and
+extension fail open. Downgrades keep existing configuration: a block contract on a plan without
+enforcement simply runs as monitor.
+
+**Billing.** With Stripe configured (`AOBS_STRIPE_*`), admins upgrade through Stripe Checkout and
+manage or cancel in the Stripe customer portal; webhooks keep the plan in sync (signature-verified,
+idempotent). Without Stripe, a platform admin sets plans in the admin console.
+
+**Platform admin.** Emails in `AOBS_PLATFORM_ADMINS` see `/admin`: every workspace with its plan,
+status and this month's usage (metadata only, never prompts or responses), and can change plans.
+
+**Live updates.** The dashboard keeps a server-sent-events connection (`/api/stream`); new calls,
+alerts and flagged runs appear without refreshing, and critical ones raise a notification.
 
 ## API
 
@@ -311,8 +382,22 @@ result is scoped to that workspace. Viewers are read-only.
 | GET | `/api/models`, `/api/models/{v}/metrics`, `/api/behavior-map` | Model registry and evaluation |
 | POST | `/api/models/retrain` | Retrain with collected labels (background) |
 | GET | `/api/policy` | Policy state, learning curves, live rewards |
+| GET | `/api/plans` | Public plan catalog |
+| GET/POST | `/api/billing`, `/api/billing/trial`, `/api/billing/checkout`, `/api/billing/portal` | Plan, usage, trial, Stripe Checkout / portal |
+| POST | `/api/billing/webhook` | Stripe webhook (signature-verified) |
+| GET/PATCH | `/api/admin/overview`, `/api/admin/workspaces/{id}` | Platform admin console |
+| GET | `/api/stream` | Live updates (server-sent events: `call`, `alert`, `run`) |
+| POST | `/api/llm/calls/{id}/feedback` | Reviewer verdict on a call's flags |
+| GET | `/api/llm/check-quality` | Measured precision of each check |
+| GET | `/health/ready` | Readiness (database reachable, models loaded) |
 
 ## Dashboard Features
+
+Built with React, TanStack Query (cached, auto-refreshing data), Radix UI (accessible menus, dialogs, tooltips), cmdk (command palette), Lucide icons, Sonner toasts and Recharts.
+
+- **Ctrl/⌘ + K** opens a command palette: jump to any page, paste a call or run ID, or search calls and runs.
+- Light, dark or system theme (account menu), and a collapsible sidebar; both are remembered per browser.
+- **Settings → About & how tracking works** explains each stage a message goes through, lets you trace a sample message (with the triggering words highlighted), and shows the real trace of your most recent message.
 
 ### LLM monitoring
 - **Overview** - calls by outcome, violation rate, adherence per model, most-violated checks, spend, latency
@@ -377,7 +462,8 @@ backend/
     models.py      # Unsupervised models (IsolationForest, k-NN, HDBSCAN)
     engine.py      # Fusion engine + supervised classifier
     bandit.py      # LinUCB intervention policy
-    simulator.py   # Agent behavior simulator
+    real_traces.py # Real SWE-agent runs -> training data and labels
+    simulator.py   # Synthetic runs for unit tests only
     training.py    # Training and evaluation
   app/             # FastAPI application
     main.py        # App startup, routers, background worker
@@ -407,7 +493,8 @@ backend/
       registry.py  # Model versioning
       training.py  # Retrain orchestration
   scripts/
-    bootstrap.py   # Setup: train + seed demo data
+    bootstrap.py   # Setup: train on real traces
+    fetch_real_traces.py  # Download the real traces
   tests/           # 54 tests: ML, auth, gateway (incl. the real OpenAI SDK), checks, API
   data/            # SQLite database (generated)
   artifacts/       # Trained models (generated)
@@ -512,12 +599,10 @@ lsof -i :8000
 
 **Empty dashboard after install:**
 ```bash
-# Bootstrap automatically seeds demo data
+# Dashboards show only real traffic. Connect an app (Connect LLMs page), or replay real agent runs:
 cd backend
-python -m scripts.bootstrap
-
-# Or generate live traffic:
-python sdk/examples/live_traffic.py --runs 50
+python -m scripts.bootstrap --reset --import-runs 400
+python ../sdk/examples/live_traffic.py --runs 50
 ```
 
 ## Configuration
@@ -534,19 +619,22 @@ Environment variables (or `backend/.env`, see `backend/.env.example`):
 | `AOBS_API_PUBLIC_URL` | `http://127.0.0.1:8000` | URL apps use for the gateway (shown on Connect page) |
 | `AOBS_GOOGLE_CLIENT_ID` / `_SECRET` | empty | Enables Google sign-in |
 | `AOBS_SMTP_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_FROM` | empty | Enables email alerts |
-| `AOBS_DEV_API_KEY` | `dev-local-key` | Development-only key for the Demo workspace |
+| `AOBS_DEV_API_KEY` | `dev-local-key` | Development-only key for the Main workspace |
 | `AOBS_CORS_ORIGINS` | `http://localhost:5173,...` | Dashboard origins |
 | `AOBS_AUTO_RETRAIN_EVERY` | `50` | Retrain after N new labels (0 = manual) |
-| `AOBS_BACKGROUND_JOBS` | `true` | Window alerts, drift tests, retention (run in one process only) |
+| `AOBS_BACKGROUND_JOBS` | `true` | Window alerts, drift tests, retention, trial expiry (a DB lease lets one process run them) |
+| `AOBS_PLATFORM_ADMINS` | empty | Comma-separated emails with access to the admin console |
+| `AOBS_STRIPE_SECRET_KEY`, `_WEBHOOK_SECRET`, `_PRICE_PRO` | empty | Enables online billing |
 
 Estimated costs use the price table in `backend/app/pricing.py`; update it to your rates.
 
 ## Limitations and next steps
 
-- Reference metrics come from a simulator. Run on real traffic, label through the review
-  queue, and watch the version history on the Detection models page.
-- The policy's offline warm start uses an assumed outcome model (`ml/simulator.py`,
-  `SUCCESS_PROB`). Live rewards from reviews override it over time.
+- Training data is one kind of agent (SWE-agent fixing GitHub issues), with behavioral labels.
+  Your agents use different tools; label their runs in the review queue to retrain on them, and
+  watch the version history on the Detection models page.
+- The intervention policy needs reviewed outcomes to learn; until then it follows the playbook.
+- `ml/simulator.py` remains only for unit tests and experiments; nothing in the app uses it.
 - Novelty is measured lexically (word bigrams). Swapping in sentence embeddings would catch
   paraphrased repetition better, at the cost of a model dependency.
 - Analytics aggregate in Python over a time window; at high volume, move them to SQL views or a
@@ -558,4 +646,6 @@ Estimated costs use the price table in `backend/app/pricing.py`; update it to yo
 - Relevance and drift similarity are lexical; judge rules cover meaning, at the cost of a judge call.
 - No password-reset email flow yet (Google sign-in or an admin can help a locked-out user);
   sign-in throttling is per process.
-- Background jobs run inside the API process; with several API workers, enable them on one only.
+- Schema changes are Alembic migrations (`backend/migrations`), applied automatically at startup.
+- Rate limits and live updates are per process. With several API processes behind a load balancer,
+  move them to a shared store (e.g. Redis); the endpoints and event shapes stay the same.

@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, useApi } from "../../api";
 import { useAuth } from "../../auth";
-import { Async, Card } from "../../components/ui";
+import { toast } from "sonner";
+import { Async, Card, useConfirm } from "../../components/ui";
 import { fmtInt, fmtPct } from "../../format";
 
-const EMPTY = { name: "", slug: "", description: "", rules: [], mode: "monitor", max_repairs: 1, fallback_models: [], judge_in_enforcement: false, active: true };
+const EMPTY = { name: "", slug: "", description: "", rules: [], mode: "monitor", max_repairs: 1, fallback_models: [], judge_in_enforcement: false, auto_redact: true, auto_fix_json: true, active: true };
 
 const PARAM_HELP = {
   json_schema: "JSON Schema, e.g. {\"type\": \"object\", \"required\": [\"answer\"]}",
@@ -19,8 +20,8 @@ const PARAM_HELP = {
 
 const MODE_HELP = {
   monitor: "Responses pass through unchanged; violations are logged and alerted on.",
-  block: "Responses with a critical violation are replaced by an HTTP 422 error.",
-  repair: "On a critical violation, the model is asked to fix its answer, then fallback models are tried, then the response is blocked.",
+  block: "Responses with a critical violation are auto-corrected when possible (masking personal data, extracting JSON), otherwise replaced by an HTTP 422 error.",
+  repair: "On a critical violation the response is auto-corrected when possible; otherwise the model is asked to fix its answer, then fallback models are tried, then the response is blocked.",
 };
 
 function slugify(s) {
@@ -65,6 +66,7 @@ export default function Contracts() {
               </table>
             )}
           </Async>
+          <CheckQuality />
         </Card>
         {selected ? (
           <Async state={types}>
@@ -121,6 +123,7 @@ function RuleEditor({ rule, types, onChange, onRemove }) {
 
 function Editor({ initial, isNew, types, onSaved, onDeleted }) {
   const { can } = useAuth();
+  const confirm = useConfirm();
   const [c, setC] = useState(initial);
   const [addType, setAddType] = useState("json_valid");
   const [msg, setMsg] = useState(null);
@@ -136,7 +139,7 @@ function Editor({ initial, isNew, types, onSaved, onDeleted }) {
     setMsg(null);
     try {
       const r = await api(isNew ? "/api/llm/contracts" : `/api/llm/contracts/${initial.id}`, { method: isNew ? "POST" : "PATCH", body: payload() });
-      setMsg({ ok: true, text: "Saved" });
+      toast.success(isNew ? `Contract “${r.name}” created` : "Contract saved");
       onSaved(r);
     } catch (e) { setMsg({ ok: false, text: e.message }); }
   };
@@ -171,6 +174,10 @@ function Editor({ initial, isNew, types, onSaved, onDeleted }) {
               </label>
               <label className="check-row"><input type="checkbox" checked={c.judge_in_enforcement} onChange={(e) => set("judge_in_enforcement", e.target.checked)} />
                 Enforce judge rules too (adds a judge call before responding)</label>
+              <label className="check-row"><input type="checkbox" checked={c.auto_redact ?? true} onChange={(e) => set("auto_redact", e.target.checked)} />
+                Auto-correct: mask personal data instead of blocking (no extra model call)</label>
+              <label className="check-row"><input type="checkbox" checked={c.auto_fix_json ?? true} onChange={(e) => set("auto_fix_json", e.target.checked)} />
+                Auto-correct: extract the JSON when the model wraps it in prose or a code fence</label>
             </>
           )}
           <label className="check-row"><input type="checkbox" checked={c.active} onChange={(e) => set("active", e.target.checked)} /> Active</label>
@@ -194,8 +201,14 @@ function Editor({ initial, isNew, types, onSaved, onDeleted }) {
         </div>
         <div className="row" style={{ marginTop: 14 }}>
           <button className="primary" onClick={save} disabled={!can("member") || !c.name || !c.slug}>Save contract</button>
-          {!isNew && can("member") && <button onClick={async () => { if (window.confirm(`Delete contract "${c.name}"?`)) { await api(`/api/llm/contracts/${initial.id}`, { method: "DELETE" }); onDeleted(); } }}>Delete</button>}
-          {msg && <span className={msg.ok ? "small" : "small"} style={{ color: msg.ok ? "var(--good-text)" : "var(--critical-text)" }}>{msg.text}</span>}
+          {!isNew && can("member") && <button onClick={async () => {
+            if (await confirm({ title: `Delete contract “${c.name}”?`, body: `Apps sending X-AOBS-Project: ${c.slug} will no longer have these rules applied.`, confirmLabel: "Delete", danger: true })) {
+              await api(`/api/llm/contracts/${initial.id}`, { method: "DELETE" });
+              toast.success("Contract deleted");
+              onDeleted();
+            }
+          }}>Delete</button>}
+          {msg && !msg.ok && <span className="small" style={{ color: "var(--critical-text)" }}>{msg.text}</span>}
         </div>
       </Card>
 
@@ -226,6 +239,38 @@ function Editor({ initial, isNew, types, onSaved, onDeleted }) {
           </div>
         )}
       </Card>
+    </div>
+  );
+}
+
+/** Per-check precision measured from reviewer feedback on call detail pages. */
+function CheckQuality() {
+  const q = useApi("/api/llm/check-quality");
+  if (!q.data) return null;
+  const { items, reviews, missed } = q.data;
+  return (
+    <div style={{ borderTop: "1px solid var(--border)", padding: "12px 16px" }}>
+      <div className="small" style={{ fontWeight: 600, marginBottom: 6 }}>Check precision</div>
+      {reviews === 0 ? (
+        <div className="small muted">Mark calls as “Flags are right” or “False alarm” on a call's page to measure how often each check is right.</div>
+      ) : (
+        <>
+          <table className="small">
+            <tbody>
+              {items.map((i) => (
+                <tr key={i.type}>
+                  <td>{i.check}</td>
+                  <td className="r num" style={{ color: i.precision != null && i.precision < 0.7 ? "var(--warning-text)" : undefined }}>
+                    {fmtPct(i.precision, 0)}
+                  </td>
+                  <td className="r muted">{i.reviewed} reviewed</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="small muted" style={{ marginTop: 6 }}>{reviews} reviews · {missed} problems the checks missed</div>
+        </>
+      )}
     </div>
   );
 }

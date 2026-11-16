@@ -10,6 +10,7 @@ export function CallSeverity({ severity }) {
 const ENF = {
   passed: ["info", "Checked"],
   repaired: ["warning", "Repaired"],
+  corrected: ["info", "Auto-corrected"],
   fallback: ["warning", "Fallback model"],
   blocked: ["critical", "Blocked"],
 };

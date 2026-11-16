@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api, useApi } from "../../api";
 import { useAuth } from "../../auth";
+import { toast } from "sonner";
 import { Async, Card, ChartTip } from "../../components/ui";
 import { fmtAgo, fmtInt, fmtNum, fmtTime } from "../../format";
 import { axisProps, usePalette } from "../../theme";
@@ -69,8 +70,12 @@ function RunButton({ id, onDone }) {
   return (
     <button disabled={busy} onClick={async () => {
       setBusy(true);
-      try { const r = await api(`/api/llm/drift-tests/${id}/run`, { method: "POST" }); if (r.status === "error") window.alert(r.detail); }
-      catch (e) { window.alert(e.message); }
+      try {
+        const r = await api(`/api/llm/drift-tests/${id}/run`, { method: "POST" });
+        if (r.status === "error") toast.error(r.detail);
+        else if (r.status === "fail") toast.warning(`Drift detected: ${r.detail}`);
+        else toast.success(r.status === "baseline" ? "Baseline saved" : `Passed (similarity ${r.similarity?.toFixed(2)})`);
+      } catch (e) { toast.error(e.message); }
       finally { setBusy(false); onDone(); }
     }}>{busy ? "Running…" : "Run now"}</button>
   );

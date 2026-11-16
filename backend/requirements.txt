@@ -5,6 +5,7 @@ pydantic-settings==2.7.0
 SQLAlchemy==2.0.36
 numpy==1.26.4
 scikit-learn==1.5.2
+polars==1.39.3
 scipy==1.13.1
 # PostgreSQL driver (only needed when AOBS_DATABASE_URL points at Postgres)
 psycopg2-binary==2.9.10

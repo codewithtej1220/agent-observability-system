@@ -48,6 +48,17 @@ class Settings(BaseSettings):
     # --- Background jobs (evaluation queue, alerts, drift tests, retention)
     background_jobs: bool = True
 
+    # --- SaaS ------------------------------------------------------------
+    # Comma-separated emails of platform owners: they get the admin console
+    # (all workspaces, plans, usage) and can assign any plan, including "internal".
+    platform_admins: str = ""
+    # Stripe (optional). Without it, plans are assigned in the admin console.
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_starter: str = ""
+    stripe_price_pro: str = ""
+    stripe_api_base: str = "https://api.stripe.com"
+
     # --- Email alerts (optional) -----------------------------------------
     smtp_host: str = ""
     smtp_port: int = 587
@@ -58,6 +69,21 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> List[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def platform_admin_list(self) -> List[str]:
+        return [e.strip().lower() for e in self.platform_admins.split(",") if e.strip()]
+
+    @property
+    def stripe_enabled(self) -> bool:
+        return bool(self.stripe_secret_key and self.stripe_price_pro)
+
+    @property
+    def stripe_prices(self) -> dict:
+        prices = {"pro": self.stripe_price_pro}
+        if self.stripe_price_starter:   # legacy subscriptions still map back to a plan
+            prices["starter"] = self.stripe_price_starter
+        return prices
 
     @property
     def google_enabled(self) -> bool:

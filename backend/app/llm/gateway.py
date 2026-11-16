@@ -32,6 +32,8 @@ import json
 import logging
 import time
 import uuid
+
+import httpx
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -42,9 +44,12 @@ from starlette.background import BackgroundTask
 from ..auth import Ctx, api_key_ctx_or_401
 from ..db import SessionLocal
 from ..orm import Workspace
-from ..orm_llm import Contract, LLMCall
+from .. import plans
+from ..orm_llm import AlertEvent, Contract, LLMCall
+from ..realtime import broker
 from ..pricing import estimate_cost
 from .checks import CheckInput, redact
+from .correct import autocorrect
 from .evaluator import Evaluation, evaluate
 from .providers import ADAPTERS, Adapter, Completion, Prompt, StreamAccumulator, estimate_tokens
 from .upstream import client, credential_key, resolve_credential
@@ -126,7 +131,8 @@ async def finalize(meta: CallMeta, out: Outcome) -> None:
         if ev is None or ev.judge_pending:
             blocked = out.enforcement_action == "blocked"  # score the upstream answer, not the 422 we returned
             ev = await evaluate(db, ws, contract, inp, status_code=200 if blocked else out.status_code,
-                                error="" if blocked else out.error)
+                                error="" if blocked else out.error, model_key=(meta.provider, out.model),
+                                latency_ms=out.latency_ms)
         tin = c.input_tokens if c.input_tokens is not None else estimate_tokens(p.all_text)
         tout = c.output_tokens if c.output_tokens is not None else estimate_tokens(c.full_text)
         store, red = bool(ws.setting("store_content")), bool(ws.setting("redact_pii"))
@@ -152,6 +158,7 @@ async def finalize(meta: CallMeta, out: Outcome) -> None:
         )
         db.add(call)
         db.commit()
+        publish_call(call)
         await on_call_evaluated(db, ws, call)
     except Exception:  # noqa: BLE001  (logging must never break the caller)
         log.exception("Failed to record LLM call %s", meta.call_id)
@@ -227,6 +234,20 @@ async def proxy(provider: str, path: str, request: Request):
         if not adapter.is_generation(path, request.method):
             return await _passthrough(adapter, request.method, path, body_bytes, headers, query)
 
+        # Plan limits never block traffic: over quota or rate, forward without analysis.
+        ws = ctx.workspace
+        skip = None
+        if not plans.rate_limiter.allow(ws.id, plans.plan_of(ws).rate_per_min):
+            skip = "rate_limit"
+        elif plans.quota_left(db, ws, "llm_calls") == 0:
+            skip = "quota"
+        if skip:
+            plans.increment(db, ws.id, "llm_calls_unanalyzed")
+            if skip == "quota":
+                notify_quota_reached(db, ws)
+            return await _forward_only(adapter, path, body_bytes, headers, query, skip)
+        plans.increment(db, ws.id, "llm_calls")
+
         try:
             body = json.loads(body_bytes or b"{}")
         except ValueError:
@@ -245,12 +266,34 @@ async def proxy(provider: str, path: str, request: Request):
             end_user=(request.headers.get("x-aobs-user") or "")[:200],
             tags=[t.strip() for t in (request.headers.get("x-aobs-tags") or "").split(",") if t.strip()][:20],
         )
-        if contract is None or contract.mode == "monitor":
-            return await _monitor(adapter, path, body_bytes, headers, query, prompt, meta)
-        ws = db.get(Workspace, ctx.workspace_id)
-        return await _enforce(db, ws, contract, adapter, path, body, headers, query, prompt, meta)
+        t0 = time.perf_counter()
+        try:
+            if contract is None or contract.mode == "monitor" or not plans.plan_of(ws).enforcement:
+                return await _monitor(adapter, path, body_bytes, headers, query, prompt, meta)
+            return await _enforce(db, ws, contract, adapter, path, body, headers, query, prompt, meta)
+        except httpx.HTTPError as e:
+            return _upstream_failure(adapter, e, meta, prompt, path, time.perf_counter() - t0)
+    except httpx.HTTPError as e:  # passthrough / forward-only (nothing to log)
+        return _upstream_failure(adapter, e)
     finally:
         db.close()
+
+
+def _upstream_failure(adapter: Adapter, e: Exception, meta: Optional[CallMeta] = None, prompt: Optional[Prompt] = None,
+                      path: str = "", elapsed_s: float = 0.0):
+    """The provider timed out or could not be reached: 504/502 in the provider's error format."""
+    timeout = isinstance(e, httpx.TimeoutException)
+    status = 504 if timeout else 502
+    message = (f"{adapter.name} did not respond within {client().timeout.read:.0f}s" if timeout
+               else f"Could not reach {adapter.name}: {type(e).__name__}")
+    log.warning("Gateway upstream failure (%s): %s", adapter.name, message)
+    resp = _error(adapter, status, message, "aobs_upstream_timeout" if timeout else "aobs_upstream_unreachable")
+    if meta is not None and prompt is not None:
+        model = prompt.model or getattr(adapter, "model_of", lambda p: "")(path)
+        out = Outcome(prompt, Completion(), model, status, message, prompt.stream, elapsed_s * 1000)
+        resp.headers["x-aobs-call-id"] = meta.call_id
+        resp.background = BackgroundTask(finalize, meta, out)
+    return resp
 
 
 async def _passthrough(adapter, method, path, body_bytes, headers, query):
@@ -259,6 +302,48 @@ async def _passthrough(adapter, method, path, body_bytes, headers, query):
     resp = await client().send(req)
     return Response(resp.content, status_code=resp.status_code,
                     media_type=resp.headers.get("content-type"), headers=_response_headers(resp.headers, ""))
+
+
+async def _forward_only(adapter: Adapter, path: str, body_bytes: bytes, headers: Dict, query: Dict, reason: str):
+    """Plain proxy (streams included) for requests that are not analyzed."""
+    req = client().build_request("POST", adapter.upstream_url(path), content=body_bytes, headers=headers, params=query)
+    resp = await client().send(req, stream=True)
+
+    async def relay():
+        try:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        finally:
+            await resp.aclose()
+
+    hdrs = _response_headers(resp.headers, "")
+    hdrs.pop("x-aobs-call-id", None)
+    hdrs["x-aobs-analysis"] = f"skipped-{reason}"
+    return StreamingResponse(relay(), status_code=resp.status_code, media_type=resp.headers.get("content-type"),
+                             headers=hdrs)
+
+
+def notify_quota_reached(db, ws: Workspace) -> None:
+    """One in-app alert per month when the analysis quota runs out."""
+    if plans.usage(db, ws.id, "quota_notice") > 0:
+        return
+    plans.increment(db, ws.id, "quota_notice")
+    plan = plans.plan_of(ws)
+    ev = AlertEvent(workspace_id=ws.id, title=f"Monthly analysis limit reached ({plan.name} plan)",
+                    message=f"{plan.llm_calls_month:,} tracked calls used this month. Calls are still forwarded to "
+                            "the provider but are no longer checked or stored. Upgrade in Settings → Plan & billing.",
+                    severity="warning", ref_type="billing")
+    db.add(ev)
+    db.commit()
+    broker.publish(ws.id, "alert", {"id": ev.id, "title": ev.title, "severity": ev.severity})
+
+
+def publish_call(call: LLMCall) -> None:
+    failed = [c["label"] for c in call.checks if not c.get("passed", True) and not c.get("skipped")]
+    broker.publish(call.workspace_id, "call", {
+        "id": call.id, "provider": call.provider, "model": call.model, "severity": call.severity,
+        "source": call.source, "enforcement_action": call.enforcement_action, "failed_checks": failed[:5],
+        "created_at": call.created_at.isoformat() + "Z" if call.created_at else None})
 
 
 async def _monitor(adapter: Adapter, path: str, body_bytes: bytes, headers: Dict, query: Dict,
@@ -282,6 +367,9 @@ async def _monitor(adapter: Adapter, path: str, body_bytes: bytes, headers: Dict
                         out.ttft_ms = (time.perf_counter() - t0) * 1000
                     acc.feed(chunk)
                     yield chunk
+            except httpx.HTTPError as e:
+                out.error = f"Stream from {adapter.name} interrupted: {type(e).__name__}"
+                log.warning("Gateway stream interrupted (%s): %s", adapter.name, type(e).__name__)
             finally:
                 await resp.aclose()
                 out.completion = acc.finish()
@@ -302,6 +390,29 @@ async def _monitor(adapter: Adapter, path: str, body_bytes: bytes, headers: Dict
         out.error = _error_text(raw)
     return Response(raw, status_code=resp.status_code, media_type=media, headers=resp_headers,
                     background=BackgroundTask(finalize, meta, out))
+
+
+def _try_correct(adapter: Adapter, contract: Contract, prompt: Prompt, path: str, query: Dict, raw: bytes,
+                 completion: Completion, ev: Evaluation):
+    """Deterministic fix in the provider's own format: (raw bytes, completion, fixes) or None."""
+    if completion.tool_calls:
+        return None
+    text, fixes = autocorrect(contract, completion.text, ev)
+    if not fixes:
+        return None
+    fixed = Completion(text=text, finish_reason=completion.finish_reason, input_tokens=completion.input_tokens,
+                       output_tokens=completion.output_tokens)
+    if prompt.stream:
+        model = prompt.model or getattr(adapter, "model_of", lambda p: "")(path)
+        full_path = f"{path}?alt=sse" if query.get("alt") == "sse" else path  # Gemini: SSE vs JSON-array stream
+        new_raw = adapter.synthesize_stream(full_path, model, text, fixed)
+    else:
+        try:
+            body = adapter.rewrite_response(path, json.loads(raw), text)
+        except (ValueError, TypeError, AttributeError):
+            body = None
+        new_raw = json.dumps(body).encode() if body is not None else None
+    return (new_raw, fixed, fixes) if new_raw is not None else None
 
 
 async def _enforce(db, ws: Workspace, contract: Contract, adapter: Adapter, path: str, body: Dict,
@@ -350,6 +461,19 @@ async def _enforce(db, ws: Workspace, contract: Contract, adapter: Adapter, path
                 hdrs["x-aobs-enforcement"] = action
                 return Response(raw, status_code=status, media_type=up_headers.get("content-type"), headers=hdrs,
                                 background=BackgroundTask(finalize, meta, out))
+            corrected = _try_correct(adapter, contract, prompt, m_path, query, raw, completion, ev)
+            if corrected is not None:
+                new_raw, fixed_completion, fixes = corrected
+                ev2 = await evaluate(db, ws, contract, CheckInput(prompt.system, prompt.last_user, fixed_completion.text,
+                                                                  completion.finish_reason), use_judge=contract.judge_in_enforcement)
+                if not ev2.critical_violations:
+                    attempts.append({"model": model, "attempt": t, "status": status, "result": "corrected", "fixes": fixes})
+                    out = Outcome(prompt, fixed_completion, model, status, "", prompt.stream, total_latency, ttft, ev2,
+                                  "corrected", attempts)
+                    hdrs = _response_headers(up_headers, meta.call_id)
+                    hdrs["x-aobs-enforcement"] = "corrected"
+                    return Response(new_raw, status_code=status, media_type=up_headers.get("content-type"), headers=hdrs,
+                                    background=BackgroundTask(finalize, meta, out))
             last = (status, raw, up_headers, completion, model, ttft)
             last_ev = ev
             blocked_reason = ev.violation_message()

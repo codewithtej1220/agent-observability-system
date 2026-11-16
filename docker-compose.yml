@@ -28,9 +28,10 @@ services:
       AOBS_API_PUBLIC_URL: ${AOBS_API_PUBLIC_URL:-http://localhost:8080}
       AOBS_GOOGLE_CLIENT_ID: ${AOBS_GOOGLE_CLIENT_ID:-}
       AOBS_GOOGLE_CLIENT_SECRET: ${AOBS_GOOGLE_CLIENT_SECRET:-}
-      AOBS_SEED_DEMO: ${AOBS_SEED_DEMO:-1}
+      AOBS_IMPORT_PUBLIC_RUNS: ${AOBS_IMPORT_PUBLIC_RUNS:-0}  # replay N held-out real runs into the demo workspace
     volumes:
       - artifacts:/app/artifacts
+      - traces:/app/data/real_traces  # downloaded once
     ports:
       - "8000:8000"
     depends_on:
@@ -45,5 +46,6 @@ services:
       - backend
 
 volumes:
+  traces:
   pgdata:
   artifacts:

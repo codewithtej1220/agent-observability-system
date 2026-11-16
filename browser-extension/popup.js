@@ -8,7 +8,8 @@ function ago(t) {
 }
 
 function render() {
-  chrome.storage.local.get({ apiKey: "", paused: false, stats: { sent: 0, issues: 0, recent: [] } }, (s) => {
+  chrome.storage.local.get({ apiKey: "", paused: false, stats: { sent: 0, issues: 0, recent: [] }, helper: null }, (s) => {
+    $("helper").textContent = !s.helper ? "" : s.helper.ok ? `Auto-start: on (last used ${ago(s.helper.at)})` : s.helper.error;
     const configured = !!s.apiKey;
     $("state").textContent = !configured ? "Not set up" : s.paused ? "Paused" : "Monitoring";
     $("state").style.color = !configured ? "#d03b3b" : s.paused ? "#c98500" : COLORS.ok;

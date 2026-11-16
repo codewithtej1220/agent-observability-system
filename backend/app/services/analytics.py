@@ -252,14 +252,14 @@ def agent_info(a: Agent) -> Dict:
 def _agent_stats(rows) -> Dict:
     k = _kpis(rows)
     n = len(rows)
-    latencies = [r.total_latency_ms for r in rows]
+    latencies = [r.total_latency_ms for r in rows if r.total_latency_ms]  # 0 = not reported
     ftypes = Counter(r.failure_type for r in rows if r.severity in FLAGGED and r.failure_type)
     return {
         **k,
         "avg_steps": round(float(np.mean([r.n_steps for r in rows])), 2) if n else 0.0,
         "avg_tokens": round(k["tokens"] / n) if n else 0,
         "avg_cost_usd": round(k["cost_usd"] / n, 4) if n else 0.0,
-        "p95_latency_s": round(float(np.percentile(latencies, 95)) / 1000, 2) if n else 0.0,
+        "p95_latency_s": round(float(np.percentile(latencies, 95)) / 1000, 2) if latencies else None,
         "top_failure": ftypes.most_common(1)[0][0] if ftypes else None,
         "failure_mix": {t: ftypes.get(t, 0) for t in FAILURE_TYPES},
     }
@@ -330,7 +330,7 @@ def tool_graph(db: Session, ws: int, agent_id: str, hours: int, max_runs: int = 
         node_list.append({
             "id": name, "kind": kind, "calls": d["calls"],
             "error_rate": round(d["errors"] / d["calls"], 4) if d["calls"] else 0.0,
-            "avg_latency_ms": round(d["latency"] / d["calls"], 1) if d["calls"] and kind != "terminal" else None,
+            "avg_latency_ms": round(d["latency"] / d["calls"], 1) if d["calls"] and d["latency"] and kind != "terminal" else None,
             "flagged_share": round(d["flagged_calls"] / d["calls"], 4) if d["calls"] and kind != "terminal" else None,
             "avg_position": 0.0 if name == "START" else round(float(np.median(d["positions"])), 2) if d["positions"] else 0.0,
         })

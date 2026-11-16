@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
+from .. import plans
 from ..orm import Workspace
 from ..orm_llm import Contract
+from . import baseline
+from .providers import estimate_tokens
 from .checks import CheckInput, CheckResult, relevance, run_builtin, run_contract_rules
 from .judge import SYSTEM_RULE_ID, SYSTEM_RULE_TEXT, judge_config, run_judge
 
@@ -60,12 +63,18 @@ class Evaluation:
 
 async def evaluate(db: Session, ws: Workspace, contract: Optional[Contract], inp: CheckInput, *,
                    use_judge: bool = True, status_code: int = 200, error: str = "",
-                   force_auto_judge: bool = False) -> Evaluation:
+                   force_auto_judge: bool = False, model_key: Optional[Tuple[str, str]] = None,
+                   latency_ms: Optional[float] = None) -> Evaluation:
     ev = Evaluation()
     ev.checks.extend(run_builtin(inp, status_code, error))
     if status_code >= 400 or error:
         return ev
     ev.relevance = relevance(inp.system + "\n" + inp.user, inp.response)
+    if model_key:
+        anomaly = baseline.check(db, ws.id, model_key[0], model_key[1], {
+            "output_tokens": estimate_tokens(inp.response), "latency_ms": latency_ms, "relevance": ev.relevance})
+        if anomaly:
+            ev.checks.append(anomaly)
 
     rules = list(contract.rules) if contract and contract.active else []
     ev.checks.extend(run_contract_rules(rules, inp))
@@ -80,7 +89,13 @@ async def evaluate(db: Session, ws: Workspace, contract: Optional[Contract], inp
         severities[SYSTEM_RULE_ID], labels[SYSTEM_RULE_ID] = "warning", "Follows the system prompt"
 
     if judge_rules:
-        if not use_judge:
+        if not plans.plan_of(ws).judge:
+            for rid, _ in judge_rules:
+                if rid != SYSTEM_RULE_ID:
+                    ev.checks.append(CheckResult(rid, "llm_judge", labels[rid], True, severities[rid],
+                                                 "Skipped: the LLM judge is not included in this plan", "judge",
+                                                 skipped=True))
+        elif not use_judge:
             ev.judge_pending = True
         elif judge_config(db, ws) is None:
             for rid, _ in judge_rules:
