@@ -16,6 +16,10 @@ you type in Gemini ──► Gemini answers ──► extension reads the finish
 
 ## Install (Chrome or Edge)
 
+**For auto-start at login (optional):**
+- Run `python browser-extension/native-host/install.py` to generate the platform-specific launcher files (`host.cmd` and `com.aobs.launcher.json` with your system paths).
+
+**Extension setup:**
 1. Open `chrome://extensions` (Edge: `edge://extensions`).
 2. Turn on **Developer mode** (top right).
 3. Click **Load unpacked** and choose this `browser-extension` folder.

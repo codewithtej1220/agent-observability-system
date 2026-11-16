@@ -1,9 +1,0 @@
-{
-  "name": "com.aobs.launcher",
-  "description": "Agent Observability: starts the local API and dashboard for the chat monitor",
-  "path": "C:\\Users\\bhanu\\Downloads\\project1-agent-observability\\project1-agent-observability\\browser-extension\\native-host\\host.cmd",
-  "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://onagnelippifefgdagmpdbnjchmfjbce/"
-  ]
-}

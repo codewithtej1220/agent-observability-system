@@ -42,5 +42,8 @@ Thumbs.db
 
 # Build artifacts
 brag-output/
-backend/migrations/
 *.db-journal
+
+# Generated native-host files (run install.py to create)
+browser-extension/native-host/host.cmd
+browser-extension/native-host/com.aobs.launcher.json
