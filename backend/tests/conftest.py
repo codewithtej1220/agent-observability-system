@@ -20,6 +20,10 @@ os.environ["AOBS_SECRET_KEY"] = "Lx2u7mXo9oHqM0JX8bUOz4dxsPJ4y6mFv0z0Sm7m0vY="
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Import db and run migrations before any other imports
+from app.db import init_db  # noqa: E402
+init_db()
+
 from ml.bandit import LinUCBPolicy  # noqa: E402
 from ml.simulator import generate_dataset, generate_run, AGENT_BY_ID  # noqa: E402
 from ml.training import train_engine  # noqa: E402
