@@ -41,4 +41,7 @@ jobs:
     needs: [backend, frontend]
     steps:
       - uses: actions/checkout@v4
-      - run: docker compose build
+      - name: Build images
+        run: docker compose build
+        env:
+          AOBS_SECRET_KEY: ci-build-only   # placeholder; the build doesn't read it, real deployments set their own
