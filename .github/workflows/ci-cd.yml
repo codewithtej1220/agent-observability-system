@@ -19,6 +19,10 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements*.txt
       - run: pip install -r requirements-dev.txt
+      - name: Run migrations
+        run: |
+          export AOBS_DATABASE_URL="sqlite:///test.db"
+          python -c "from app.db import init_db; init_db()"
       - run: python -m pytest
 
   frontend:
