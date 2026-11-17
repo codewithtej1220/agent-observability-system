@@ -3,7 +3,9 @@ import { useNavigate } from "react-router-dom";
 import {
   Bar, BarChart, CartesianGrid, LabelList, Line, LineChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis, ZAxis,
 } from "recharts";
+import { toast } from "sonner";
 import { api, useApi } from "../api";
+import { useAuth } from "../auth";
 import Heatmap from "../components/Heatmap";
 import PipelineDiagram from "../components/PipelineDiagram";
 import { Async, Card, ChartTip, Legend, Tile } from "../components/ui";
@@ -11,16 +13,18 @@ import { fmtInt, fmtNum, fmtPct, fmtTime, humanize } from "../format";
 import { APPROACH_ORDER, FAILURE_LABEL, FAILURE_ORDER, axisProps, usePalette } from "../theme";
 
 export default function Models({ meta }) {
+  const { can } = useAuth();
   const models = useApi("/api/models", { refreshMs: 10000 });
   const [version, setVersion] = useState(null);
   const active = models.data?.versions.find((v) => v.active)?.version;
   const v = version || active;
   const metrics = useApi(v ? `/api/models/${v}/metrics` : null);
-  const [msg, setMsg] = useState(null);
 
   const retrain = async () => {
-    const r = await api("/api/models/retrain", { method: "POST" });
-    setMsg(r.message);
+    try {
+      const r = await api("/api/models/retrain", { method: "POST" });
+      (r.started ? toast.success : toast.info)(r.started ? "Retraining started; the new version appears when it finishes" : r.message);
+    } catch (e) { toast.error(e.message); }
     models.reload();
   };
 
@@ -36,8 +40,9 @@ export default function Models({ meta }) {
           </p>
         </div>
         <div className="row">
-          {msg && <span className="small text-2">{msg}</span>}
-          <button onClick={retrain} disabled={models.data?.retraining}>{models.data?.retraining ? "Retraining…" : "Retrain with new labels"}</button>
+          {can("admin") && (
+            <button onClick={retrain} disabled={models.data?.retraining}>{models.data?.retraining ? "Retraining…" : "Retrain with new labels"}</button>
+          )}
         </div>
       </div>
 
@@ -92,9 +97,11 @@ function Metrics({ m, meta }) {
   return (
     <>
       <div className="note" style={{ marginBottom: 12 }}>
-        Evaluated on {fmtInt(m.test_runs)} held-out runs that were never used for training (model {m.version}). The
-        reference data comes from the built-in simulator, which includes deliberately ambiguous healthy behavior
-        (pagination, polling, retries). Expect lower numbers on real traffic; the review queue is how the model adapts to it.
+        Evaluated on {fmtInt(m.test_runs)} held-out real agent runs that were never used for training (model {m.version}).
+        Training and test data are real SWE-agent runs on GitHub issues (nebius/SWE-agent-trajectories, CC BY 4.0), split by
+        issue so no test run shares an issue with training. Labels come from what happened in each run: “command not found”,
+        identical command and output repeated, budget exhausted without a fix, navigation with no edits, or the issue resolved.
+        Your agents differ; labels from the review queue retrain the model on your own runs.
       </div>
       <div className="tiles">
         <Tile label="Macro F1 (5 classes)" value={fmtNum(m.macro_f1, 3)} />
@@ -265,7 +272,7 @@ function Metrics({ m, meta }) {
 
       <Card title="Training details">
         <dl className="kv">
-          <dt>Training runs</dt><dd>{fmtInt(t.train_runs)} simulated + {fmtInt(t.human_labels)} human-labeled</dd>
+          <dt>Training runs</dt><dd>{fmtInt(t.train_runs)} real agent runs (public traces) + {fmtInt(t.human_labels)} labeled in your review queue</dd>
           <dt>Supervised samples</dt><dd>{fmtInt(t.supervised_samples)} run prefixes (early-detection training)</dd>
           <dt>Unsupervised samples</dt><dd>{fmtInt(t.unsupervised_samples)} prefixes of rule-clean runs (no labels used)</dd>
           <dt>Fusion weights</dt><dd className="mono">{t.fusion_weights ? Object.entries(t.fusion_weights).map(([k, w]) => `${k}=${w}`).join("  ") : "–"}</dd>

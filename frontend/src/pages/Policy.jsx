@@ -1,7 +1,7 @@
 import { Bar, BarChart, CartesianGrid, LabelList, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useApi } from "../api";
 import Heatmap from "../components/Heatmap";
-import { Async, Card, ChartTip, Legend, Tile } from "../components/ui";
+import { Async, Card, ChartTip, Tile } from "../components/ui";
 import { fmtInt, fmtNum, humanize } from "../format";
 import { FAILURE_LABEL, axisProps, usePalette } from "../theme";
 
@@ -12,17 +12,8 @@ export default function Policy() {
 
 function Body({ d }) {
   const pal = usePalette();
-  const ws = d.warm_start;
   const live = d.live;
   const pol = d.policy;
-  const curveColors = {
-    "LinUCB policy": pal.series[0],
-    "Static playbook": pal.series[1],
-    "Always human review": pal.series[2],
-    Random: pal.neutral,
-    Oracle: pal.muted,
-  };
-  const curveKeys = ws ? Object.keys(ws.final_avg_reward) : [];
   const actionLabel = Object.fromEntries((pol?.actions || []).map((a) => [a.action, a.label]));
   const rewardData = live.reward_by_action.filter((r) => r.n > 0);
 
@@ -42,36 +33,18 @@ function Body({ d }) {
       </div>
 
       <div className="tiles">
-        <Tile label="Policy updates" value={fmtInt(pol?.n_updates)} delta="offline warm start + live feedback" />
+        <Tile label="Policy updates" value={fmtInt(pol?.n_updates)} delta="reviewed outcomes" />
         <Tile label="Live decisions" value={fmtInt(live.decisions)} />
         <Tile label="Decisions with outcome" value={fmtInt(live.rewarded)} />
         <Tile label="Average live reward" value={fmtNum(live.avg_reward)} delta="per reviewed decision" />
         <Tile label="Exploration (α)" value={fmtNum(pol?.alpha, 1)} />
       </div>
 
-      {ws && (
-        <div className="grid cols-2" style={{ marginBottom: 16 }}>
-          <Card title="Offline warm start" sub={`${fmtInt(ws.rounds)} simulated decisions: cumulative average reward vs baselines`}>
-            <ResponsiveContainer width="100%" height={250}>
-              <LineChart data={ws.learning_curve} margin={{ top: 4, right: 12, left: -12, bottom: 0 }}>
-                <CartesianGrid vertical={false} stroke={pal.grid} />
-                <XAxis dataKey="round" {...axisProps(pal)} tickFormatter={(v) => `${v / 1000}k`} />
-                <YAxis {...axisProps(pal)} axisLine={false} />
-                <ReferenceLine y={0} stroke={pal.axis} />
-                <Tooltip content={<ChartTip labelFormatter={(r) => `After ${fmtInt(r)} decisions`} valueFormatter={(v) => v.toFixed(3)} />} />
-                {curveKeys.map((k) => <Line key={k} dataKey={k} stroke={curveColors[k]} strokeWidth={2} dot={false} isAnimationActive={false} />)}
-              </LineChart>
-            </ResponsiveContainer>
-            <Legend items={curveKeys.map((k) => ({ label: `${k} (${ws.final_avg_reward[k].toFixed(2)})`, color: curveColors[k], line: true }))} />
-            <div className="small muted" style={{ marginTop: 6 }}>
-              The oracle knows the true failure and is an upper bound. The policy sees only what the detectors see.
-            </div>
-          </Card>
-          <Card title="What the policy learned" sub="Actions chosen in the last quarter of warm start, by true condition (share of row)">
-            <Heatmap rows={ws.action_by_true_label.labels} cols={ws.action_by_true_label.actions} matrix={ws.action_by_true_label.matrix}
-                     rowLabel={(l) => FAILURE_LABEL[l]} colLabel={humanize} corner="true condition"
-                     format={(v, share) => (v ? `${Math.round(share * 100)}%` : "")} />
-          </Card>
+      {pol && pol.n_updates < 20 && (
+        <div className="note" style={{ marginBottom: 16 }}>
+          The policy learns only from real outcomes: each time a reviewer records what happened after an intervention. Until it has
+          {" "}20 of them ({fmtInt(pol.n_updates)} so far), flagged runs get the playbook action for their failure type (loop: retry the
+          step, tool thrashing: human review, hallucinated tool: stronger model, token waste: stop), and those outcomes train it.
         </div>
       )}
 
@@ -114,24 +87,6 @@ function Body({ d }) {
                      rowLabel={(l) => FAILURE_LABEL[l] || humanize(l)} colLabel={(a) => humanize(a)} corner="detected" />
           )}
         </Card>
-        {ws && (
-          <Card title="Simulated outcome model" sub="Assumed P(run succeeds | condition, action) used only for the offline warm start">
-            <div className="table-wrap">
-              <table>
-                <thead><tr><th>Condition</th>{pol.actions.map((a) => <th key={a.action} className="r small" style={{ whiteSpace: "normal" }}>{a.label}</th>)}</tr></thead>
-                <tbody>
-                  {Object.entries(ws.success_model).map(([cond, row]) => (
-                    <tr key={cond}><td className="small">{FAILURE_LABEL[cond]}</td>{pol.actions.map((a) => <td key={a.action} className="r small">{Math.round(row[a.action] * 100)}%</td>)}</tr>
-                  ))}
-                  <tr><td className="small text-2">Action cost</td>{pol.actions.map((a) => <td key={a.action} className="r small text-2">{a.cost.toFixed(2)}</td>)}</tr>
-                </tbody>
-              </table>
-            </div>
-            <div className="small muted" style={{ marginTop: 8 }}>
-              Edit <code>ml/simulator.py</code> to match your environment. In production the policy keeps learning from real reviewed outcomes.
-            </div>
-          </Card>
-        )}
       </div>
       <div style={{ marginTop: 16 }}>
         <Card title="Learned weights" sub="Expected-reward coefficient per context feature and action (blue raises, red lowers)">

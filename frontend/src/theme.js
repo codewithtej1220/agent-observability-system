@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
 // Chart colors. Recharts takes colors as SVG attributes (no CSS variables),
 // so light/dark values live here and the hook picks the current set.
@@ -35,15 +35,39 @@ function query() {
     : null;
 }
 
+// Theme mode: "system" | "light" | "dark", remembered per browser.
+const THEME_KEY = "aobs-theme";
+const listeners = new Set();
+function readMode() {
+  try { return localStorage.getItem(THEME_KEY) || "system"; } catch { return "system"; }
+}
+let mode = readMode();
+function applyMode() {
+  const root = document.documentElement;
+  if (mode === "system") root.removeAttribute("data-theme"); else root.setAttribute("data-theme", mode);
+}
+if (typeof document !== "undefined") applyMode();
+
+export function setThemeMode(next) {
+  mode = next;
+  try { localStorage.setItem(THEME_KEY, next); } catch { /* storage blocked: still applies for this session */ }
+  applyMode();
+  listeners.forEach((l) => l());
+}
+const subscribe = (l) => { listeners.add(l); return () => listeners.delete(l); };
+export const useThemeMode = () => useSyncExternalStore(subscribe, () => mode);
+
 export function usePalette() {
-  const [dark, setDark] = useState(() => !!query()?.matches);
+  const current = useThemeMode();
+  const [systemDark, setSystemDark] = useState(() => !!query()?.matches);
   useEffect(() => {
     const q = query();
     if (!q) return undefined;
-    const fn = (e) => setDark(e.matches);
+    const fn = (e) => setSystemDark(e.matches);
     q.addEventListener("change", fn);
     return () => q.removeEventListener("change", fn);
   }, []);
+  const dark = current === "dark" || (current === "system" && systemDark);
   const p = dark ? DARK : LIGHT;
   return {
     ...p,

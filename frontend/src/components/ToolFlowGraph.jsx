@@ -111,7 +111,7 @@ export default function ToolFlowGraph({ graph }) {
                 <text x={10} y={36} style={{ fill: "var(--text-2)", fontSize: 11 }}>
                   {terminal ? `${fmtInt(n.calls)} runs` : `${fmtInt(n.calls)} calls · ${fmtPct(n.error_rate, 0)} err`}
                 </text>
-                <title>{terminal ? n.id : `${n.id}\n${fmtInt(n.calls)} calls\nError rate ${fmtPct(n.error_rate)}\nAvg latency ${fmtInt(n.avg_latency_ms)} ms\n${fmtPct(n.flagged_share)} of calls in flagged runs${unreg ? "\nNOT a registered tool" : ""}`}</title>
+                <title>{terminal ? n.id : `${n.id}\n${fmtInt(n.calls)} calls\nError rate ${fmtPct(n.error_rate)}${n.avg_latency_ms == null ? "" : `\nAvg latency ${fmtInt(n.avg_latency_ms)} ms`}\n${fmtPct(n.flagged_share)} of calls in flagged runs${unreg ? "\nNOT a registered tool" : ""}`}</title>
               </g>
             );
           })}

@@ -10,10 +10,19 @@ import pytest
 _TMP = tempfile.mkdtemp(prefix="aobs-test-")
 os.environ["AOBS_DATABASE_URL"] = f"sqlite:///{Path(_TMP, 'test.db').as_posix()}"
 os.environ["AOBS_ARTIFACTS_DIR"] = str(Path(_TMP, "artifacts"))
-os.environ["AOBS_API_KEYS"] = "test-key"
+os.environ["AOBS_DEV_API_KEY"] = "test-key"
 os.environ["AOBS_AUTO_RETRAIN_EVERY"] = "0"
+os.environ["AOBS_BACKGROUND_JOBS"] = "false"
+os.environ["AOBS_GOOGLE_CLIENT_ID"] = "test-client"
+os.environ["AOBS_GOOGLE_CLIENT_SECRET"] = "test-secret"
+# Fixed test-only encryption key (not a real secret).
+os.environ["AOBS_SECRET_KEY"] = "Lx2u7mXo9oHqM0JX8bUOz4dxsPJ4y6mFv0z0Sm7m0vY="
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Import db and run migrations before any other imports
+from app.db import init_db  # noqa: E402
+init_db()
 
 from ml.bandit import LinUCBPolicy  # noqa: E402
 from ml.simulator import generate_dataset, generate_run, AGENT_BY_ID  # noqa: E402
@@ -35,6 +44,12 @@ def client(small_engine):
     from app.services.registry import registry
 
     with TestClient(app) as c:
+        from app.db import SessionLocal
+        from scripts.bootstrap import ensure_demo_workspace
+
+        db = SessionLocal()
+        ensure_demo_workspace(db)
+        db.close()
         registry.activate(small_engine)
         registry.policy = LinUCBPolicy()
         c.headers.update({"X-API-Key": "test-key"})
@@ -49,3 +64,39 @@ def make_run():
         return generate_run(random.Random(seed), agent=AGENT_BY_ID[agent], label=label)
 
     return _make
+
+
+@pytest.fixture
+def new_user(client):
+    """Factory: sign up a fresh user in an isolated TestClient (own cookie jar)."""
+    import uuid
+
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    made = []
+
+    def _make(email=None, password="correct-horse-9"):
+        c = TestClient(app)
+        c.headers.update({"X-Requested-With": "aobs"})
+        email = email or f"user-{uuid.uuid4().hex[:8]}@example.com"
+        r = c.post("/api/auth/signup", json={"email": email, "password": password, "name": "Test User"})
+        assert r.status_code == 200, r.text
+        made.append(c)
+        return c, email
+
+    return _make
+
+
+def set_plan(client, plan: str, status: str = "active") -> int:
+    """Put the signed-in client's current workspace on `plan`; returns the workspace id."""
+    from app.db import SessionLocal
+    from app.orm import Workspace
+
+    ws_id = client.get("/api/auth/me").json()["workspace"]["id"]
+    with SessionLocal() as db:
+        ws = db.get(Workspace, ws_id)
+        ws.plan, ws.plan_status = plan, status
+        db.commit()
+    return ws_id

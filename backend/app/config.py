@@ -17,19 +17,81 @@ class Settings(BaseSettings):
     environment: str = "development"
     database_url: str = f"sqlite:///{(BACKEND_DIR / 'data' / 'observability.db').as_posix()}"
     artifacts_dir: Path = BACKEND_DIR / "artifacts"
-    # Comma-separated. Ingest clients and the dashboard send one in X-API-Key.
-    api_keys: str = DEV_API_KEY
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     # Retrain the classifier automatically after this many new human labels (0 disables).
     auto_retrain_every: int = 50
 
-    @property
-    def api_key_list(self) -> List[str]:
-        return [k.strip() for k in self.api_keys.split(",") if k.strip()]
+    # --- Security -------------------------------------------------------
+    # Fernet key(s) used to encrypt stored provider API keys. Comma-separate
+    # to rotate (first one encrypts). Required in production.
+    secret_key: str = ""
+    # Development-only API key mapped to the demo workspace (ignored in production).
+    dev_api_key: str = DEV_API_KEY
+    session_days: int = 14
+    # Set to true when served over HTTPS so the session cookie is Secure.
+    cookie_secure: bool = False
+
+    # --- Google sign-in (optional) ---------------------------------------
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    # Public URL of the dashboard; Google redirects to {public_url}/api/auth/google/callback.
+    public_url: str = "http://localhost:5173"
+
+    # --- LLM gateway -----------------------------------------------------
+    # URL your applications use to reach this API (shown in setup instructions).
+    api_public_url: str = "http://127.0.0.1:8000"
+    openai_base_url: str = "https://api.openai.com"
+    anthropic_base_url: str = "https://api.anthropic.com"
+    gemini_base_url: str = "https://generativelanguage.googleapis.com"
+    gateway_timeout_s: float = 120.0
+
+    # --- Background jobs (evaluation queue, alerts, drift tests, retention)
+    background_jobs: bool = True
+
+    # --- SaaS ------------------------------------------------------------
+    # Comma-separated emails of platform owners: they get the admin console
+    # (all workspaces, plans, usage) and can assign any plan, including "internal".
+    platform_admins: str = ""
+    # Stripe (optional). Without it, plans are assigned in the admin console.
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_starter: str = ""
+    stripe_price_pro: str = ""
+    stripe_api_base: str = "https://api.stripe.com"
+
+    # --- Email alerts (optional) -----------------------------------------
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
 
     @property
     def cors_origin_list(self) -> List[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def platform_admin_list(self) -> List[str]:
+        return [e.strip().lower() for e in self.platform_admins.split(",") if e.strip()]
+
+    @property
+    def stripe_enabled(self) -> bool:
+        return bool(self.stripe_secret_key and self.stripe_price_pro)
+
+    @property
+    def stripe_prices(self) -> dict:
+        prices = {"pro": self.stripe_price_pro}
+        if self.stripe_price_starter:   # legacy subscriptions still map back to a plan
+            prices["starter"] = self.stripe_price_starter
+        return prices
+
+    @property
+    def google_enabled(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret)
+
+    @property
+    def dev_key_enabled(self) -> bool:
+        return self.environment != "production" and bool(self.dev_api_key)
 
 
 @lru_cache

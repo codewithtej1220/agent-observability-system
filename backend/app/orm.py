@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -14,9 +14,127 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+# ============================================================================
+# Accounts, workspaces and credentials
+# ============================================================================
+
+DEFAULT_WORKSPACE_SETTINGS = {
+    "store_content": True,       # store prompt/response text for LLM calls
+    "redact_pii": False,         # mask emails/phones/cards before storing
+    "retention_days": 30,        # delete LLM call content older than this
+    "auto_judge": False,         # judge every call against its system prompt
+    "judge_sample_rate": 0.25,   # fraction of calls auto-judged (cost control)
+    "judge_credential_id": None, # provider credential used by the LLM judge
+    "judge_model": None,         # e.g. "gpt-4o-mini", "claude-haiku-4-5", "gemini-2.5-flash"
+}
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), default="")
+    password_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    google_sub: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_workspace_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # signed back in here
+
+
+class Workspace(Base):
+    __tablename__ = "workspaces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200))
+    settings: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    # Subscription (see app/plans.py). Limits come from plans.plan_of(), never read these directly.
+    plan: Mapped[str] = mapped_column(String(20), default="free", server_default="free")
+    plan_status: Mapped[str] = mapped_column(String(20), default="active", server_default="active")
+    trial_ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    trial_used: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    stripe_customer_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    stripe_subscription_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    current_period_end: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    def setting(self, key: str):
+        return (self.settings or {}).get(key, DEFAULT_WORKSPACE_SETTINGS.get(key))
+
+
+ROLES = ("admin", "member", "viewer")
+
+
+class Membership(Base):
+    __tablename__ = "memberships"
+    __table_args__ = (UniqueConstraint("user_id", "workspace_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(20), default="member")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class UserSession(Base):
+    """Server-side session; the cookie holds a random token, the DB holds its SHA-256."""
+
+    __tablename__ = "sessions"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    workspace_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    user_agent: Mapped[str] = mapped_column(String(300), default="")
+
+
+class ApiKey(Base):
+    """Workspace API key for the SDK and the LLM gateway. Only its SHA-256 is stored."""
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    prefix: Mapped[str] = mapped_column(String(16))
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+PROVIDERS = ("openai", "anthropic", "gemini")
+
+
+class ProviderCredential(Base):
+    """An LLM provider API key, encrypted at rest (see app/crypto.py)."""
+
+    __tablename__ = "provider_credentials"
+    __table_args__ = (UniqueConstraint("workspace_id", "provider", "name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(20))
+    name: Mapped[str] = mapped_column(String(100), default="default")
+    encrypted_key: Mapped[str] = mapped_column(Text)
+    key_hint: Mapped[str] = mapped_column(String(16))
+    is_default: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+# ============================================================================
+# Agent monitoring
+# ============================================================================
+
 class Agent(Base):
     __tablename__ = "agents"
 
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default="")
@@ -29,12 +147,13 @@ class Agent(Base):
 class RunRecord(Base):
     __tablename__ = "runs"
     __table_args__ = (
-        Index("ix_runs_agent_started", "agent_id", "started_at"),
-        Index("ix_runs_severity_started", "severity", "started_at"),
+        Index("ix_runs_ws_agent_started", "workspace_id", "agent_id", "started_at"),
+        Index("ix_runs_ws_severity_started", "workspace_id", "severity", "started_at"),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id"), index=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[str] = mapped_column(String(64), index=True)
     task: Mapped[str] = mapped_column(Text, default="")
     model: Mapped[str] = mapped_column(String(100), default="")
     status: Mapped[str] = mapped_column(String(20), default="running")  # running | completed | incomplete
@@ -70,7 +189,7 @@ class RunRecord(Base):
     decision: Mapped[dict] = mapped_column(JSON, default=dict)
     policy_context: Mapped[list] = mapped_column(JSON, default=list)
 
-    # Ground truth when traffic comes from the simulator (never shown to models).
+    # Known label when the run is a replayed public trace (never shown to models).
     source_label: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     failure_onset: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
@@ -142,6 +261,7 @@ class PolicyEvent(Base):
     __tablename__ = "policy_events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int] = mapped_column(Integer, index=True)
     run_id: Mapped[str] = mapped_column(String(64), index=True)
     action: Mapped[str] = mapped_column(String(40))
     failure_type: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
@@ -149,3 +269,39 @@ class PolicyEvent(Base):
     reward: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     rewarded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+# ============================================================================
+# Subscriptions and operations
+# ============================================================================
+
+class UsageCounter(Base):
+    """Monthly usage per workspace and metric (llm_calls, agent_runs, llm_calls_unanalyzed)."""
+
+    __tablename__ = "usage_counters"
+
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    period: Mapped[str] = mapped_column(String(7), primary_key=True)  # YYYY-MM
+    metric: Mapped[str] = mapped_column(String(40), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class BillingEvent(Base):
+    """Processed Stripe webhook events, so a redelivered event is applied only once."""
+
+    __tablename__ = "billing_events"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    type: Mapped[str] = mapped_column(String(80))
+    workspace_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class JobLease(Base):
+    """Lets exactly one API process run the background jobs at a time."""
+
+    __tablename__ = "job_leases"
+
+    name: Mapped[str] = mapped_column(String(40), primary_key=True)
+    holder: Mapped[str] = mapped_column(String(80))
+    expires_at: Mapped[datetime] = mapped_column(DateTime)

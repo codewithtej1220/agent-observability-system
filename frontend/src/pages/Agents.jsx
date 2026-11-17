@@ -54,7 +54,8 @@ function Body({ agents, hours }) {
                   <td onClick={(e) => e.stopPropagation()}>
                     <input type="checkbox" aria-label={`Select ${a.name}`} checked={selected.includes(a.id)} onChange={() => toggle(a.id)} />
                   </td>
-                  <td><strong>{a.name}</strong><div className="small muted">{a.description}</div></td>
+                  <td style={{ minWidth: 240 }}><strong style={{ whiteSpace: "nowrap" }}>{a.name}</strong>
+                    <div className="small muted truncate" style={{ maxWidth: 300 }} title={a.description}>{a.description}</div></td>
                   <td className="small">{a.model}<div className="muted">{a.framework}</div></td>
                   <td className="r">{fmtInt(a.runs)}</td>
                   <td className="r">{fmtPct(a.flagged_rate)}</td>
@@ -63,7 +64,7 @@ function Body({ agents, hours }) {
                   <td className="r">{fmtNum(a.avg_steps, 1)}</td>
                   <td className="r">{fmtCompact(a.avg_tokens)}</td>
                   <td className="r">{fmtUsd(a.avg_cost_usd, 3)}</td>
-                  <td className="r">{fmtNum(a.p95_latency_s, 1)} s</td>
+                  <td className="r">{a.p95_latency_s == null ? "–" : `${fmtNum(a.p95_latency_s, 1)} s`}</td>
                   <td className="r">{fmtUsd(a.avoidable_cost_usd)}</td>
                 </tr>
               ))}

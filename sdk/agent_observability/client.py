@@ -25,6 +25,12 @@ class Assessment:
     action_label: str
     reason: str
     signals: List[Dict[str, Any]] = field(default_factory=list)
+    correction: Optional[Dict[str, Any]] = None
+
+    @property
+    def correction_prompt(self) -> Optional[str]:
+        """Message to add to the agent's context for reflect / retry / escalate actions."""
+        return (self.correction or {}).get("prompt")
 
     @property
     def should_stop(self) -> bool:
@@ -40,7 +46,7 @@ class Assessment:
         return cls(
             run_id=d["run_id"], step_count=d["step_count"], risk_score=d["risk_score"], severity=d["severity"],
             failure_type=d.get("failure_type"), action=d["recommended_action"], action_label=d["action_label"],
-            reason=d.get("action_reason", ""), signals=d.get("signals", []),
+            reason=d.get("action_reason", ""), signals=d.get("signals", []), correction=d.get("correction"),
         )
 
 

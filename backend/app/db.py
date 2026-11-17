@@ -36,10 +36,31 @@ engine = _make_engine(get_settings().database_url)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
-def init_db() -> None:
-    from . import orm  # noqa: F401  (register tables)
+BASELINE_REVISION = "0001"
 
-    Base.metadata.create_all(engine)
+
+def init_db() -> None:
+    """Bring the schema up to date by applying Alembic migrations.
+
+    A database created before migrations existed (tables present, no
+    alembic_version table) is stamped at the baseline first, so only newer
+    migrations are applied and existing data is kept.
+    """
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import inspect
+
+    from . import orm, orm_llm  # noqa: F401  (register tables)
+    from .config import BACKEND_DIR
+
+    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_DIR / "migrations"))
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        tables = set(inspect(conn).get_table_names())
+        if tables and "alembic_version" not in tables:
+            command.stamp(cfg, BASELINE_REVISION)
+        command.upgrade(cfg, "head")
 
 
 def get_db() -> Iterator[Session]:

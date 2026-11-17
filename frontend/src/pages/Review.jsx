@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { toast } from "sonner";
 import { api, useApi } from "../api";
+import { useAuth } from "../auth";
 import { Async, Card, Meter, Segmented, Tile } from "../components/ui";
 import { fmtInt } from "../format";
 import { usePalette } from "../theme";
@@ -12,15 +14,17 @@ const SORTS = [
 ];
 
 export default function Review() {
+  const { can } = useAuth();
   const [sort, setSort] = useState("uncertainty");
   const state = useApi(`/api/review-queue?sort=${sort}&limit=50`, { refreshMs: 15000 });
   const models = useApi("/api/models", { refreshMs: 10000 });
   const pal = usePalette();
-  const [msg, setMsg] = useState(null);
 
   const retrain = async () => {
-    const r = await api("/api/models/retrain", { method: "POST" });
-    setMsg(r.message);
+    try {
+      const r = await api("/api/models/retrain", { method: "POST" });
+      (r.started ? toast.success : toast.info)(r.started ? "Retraining started; the new version appears when it finishes" : r.message);
+    } catch (e) { toast.error(e.message); }
     models.reload();
   };
 
@@ -36,8 +40,9 @@ export default function Review() {
           </p>
         </div>
         <div className="row">
-          {msg && <span className="small text-2">{msg}</span>}
-          <button onClick={retrain} disabled={models.data?.retraining}>{models.data?.retraining ? "Retraining…" : "Retrain now"}</button>
+          {can("admin") && (
+            <button onClick={retrain} disabled={models.data?.retraining}>{models.data?.retraining ? "Retraining…" : "Retrain now"}</button>
+          )}
         </div>
       </div>
       <Async state={state}>

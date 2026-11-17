@@ -2,12 +2,12 @@
 set -e
 
 if [ ! -d /app/artifacts/models ]; then
-  if [ "${AOBS_SEED_DEMO:-1}" = "1" ]; then
-    echo "No models found: training and seeding demo history (about 2 minutes)..."
-    python -m scripts.bootstrap
+  echo "No models found: downloading real agent traces and training (several minutes)..."
+  python -m scripts.fetch_real_traces
+  if [ "${AOBS_IMPORT_PUBLIC_RUNS:-0}" != "0" ]; then
+    python -m scripts.bootstrap --skip-robustness --import-runs "${AOBS_IMPORT_PUBLIC_RUNS}"
   else
-    echo "No models found: training models only..."
-    python -m scripts.bootstrap --no-history
+    python -m scripts.bootstrap --skip-robustness
   fi
 fi
 

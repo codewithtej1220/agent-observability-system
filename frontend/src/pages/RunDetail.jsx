@@ -110,6 +110,18 @@ function Body({ r, meta, reload }) {
         <Card title="Recommended intervention" sub={r.decision?.at_step != null ? `Decided at step ${r.decision.at_step + 1}` : ""}>
           <div style={{ fontSize: 18, fontWeight: 600 }}>{r.decision?.label || humanize(r.recommended_action)}</div>
           <p className="small text-2" style={{ margin: "6px 0 12px" }}>{r.decision?.reason}</p>
+          {r.correction && (
+            <div style={{ marginBottom: 12 }}>
+              <div className="spread small" style={{ marginBottom: 6 }}>
+                <strong>Correction prompt</strong>
+                <button className="link-btn" onClick={() => navigator.clipboard?.writeText(r.correction.prompt)}>Copy</button>
+              </div>
+              <pre className="correction-box">{r.correction.prompt}</pre>
+              <div className="small muted" style={{ marginTop: 6 }}>
+                The SDK returns this as <code>assessment.correction_prompt</code>; add it to the agent's context to steer it back on track.
+              </div>
+            </div>
+          )}
           {r.decision?.scores && Object.keys(r.decision.scores).length > 0 && (
             <table>
               <thead><tr><th>Action</th><th className="r">Expected</th><th className="r">Explore</th><th className="r">UCB</th></tr></thead>

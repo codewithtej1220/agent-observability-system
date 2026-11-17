@@ -103,7 +103,7 @@ export function RunTable({ rows, extra }) {
           {rows.map((r) => (
             <tr key={r.id} className="clickable" onClick={() => nav(`/runs/${r.id}`)}>
               <td className="small" style={{ whiteSpace: "nowrap" }}>{fmtTime(r.started_at)}<div className="muted mono">{shortId(r.id)}</div></td>
-              <td className="small">{r.agent_id}</td>
+              <td className="small mono" style={{ whiteSpace: "nowrap" }}>{r.agent_id}</td>
               <td><div className="truncate">{r.task}</div>{r.status === "running" && <span className="badge neutral">Running</span>}</td>
               <td><SeverityBadge severity={r.severity} /></td>
               <td><FailureTag type={r.failure_type} />{r.open_set_flag && <div className="small muted">open-set</div>}</td>

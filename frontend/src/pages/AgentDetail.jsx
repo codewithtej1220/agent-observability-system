@@ -40,7 +40,7 @@ function Body({ a, hours, flagged }) {
         <Tile label="Success rate" value={fmtPct(s.success_rate)} delta="healthy runs with a final answer" />
         <Tile label="Avg tokens / run" value={fmtCompact(s.avg_tokens)} delta={a.baseline ? `baseline median ${fmtCompact(a.baseline.median_tokens)}` : undefined} />
         <Tile label="Avg cost / run" value={fmtUsd(s.avg_cost_usd, 3)} delta={`${fmtUsd(s.cost_usd)} total`} />
-        <Tile label="p95 run latency" value={`${fmtNum(s.p95_latency_s, 1)} s`} />
+        <Tile label="p95 run latency" value={s.p95_latency_s == null ? "–" : `${fmtNum(s.p95_latency_s, 1)} s`} hint="Shown when the agent reports step latency" />
         <Tile label="Avoidable spend" value={fmtUsd(s.avoidable_cost_usd)} delta={`${fmtCompact(s.avoidable_tokens)} tokens`} />
       </div>
 

@@ -34,10 +34,11 @@ def _require_ready():
     return registry.engine, registry.policy
 
 
-def ensure_agent(db: Session, agent_id: str, registered_tools: Optional[List[str]] = None, model: str = "") -> Agent:
-    agent = db.get(Agent, agent_id)
+def ensure_agent(db: Session, ws_id: int, agent_id: str, registered_tools: Optional[List[str]] = None,
+                 model: str = "") -> Agent:
+    agent = db.get(Agent, (ws_id, agent_id))
     if agent is None:
-        agent = Agent(id=agent_id, name=agent_id, model=model, registered_tools=registered_tools)
+        agent = Agent(workspace_id=ws_id, id=agent_id, name=agent_id, model=model, registered_tools=registered_tools)
         db.add(agent)
         db.flush()
     elif registered_tools and not agent.registered_tools:
@@ -98,7 +99,7 @@ def _apply_decision(db: Session, rec: RunRecord, a: Dict, decision, at_step: int
                     "failure_type_at_decision": a["failure_type"]}
     rec.policy_context = build_context(a).tolist() if decision.by_policy else []
     if decision.by_policy:
-        db.add(PolicyEvent(run_id=rec.id, action=decision.action, failure_type=a["failure_type"],
+        db.add(PolicyEvent(workspace_id=rec.workspace_id, run_id=rec.id, action=decision.action, failure_type=a["failure_type"],
                            risk_score=a["risk_score"], created_at=rec.started_at + timedelta(seconds=at_step)))
 
 
@@ -114,7 +115,7 @@ def _finalize_waste(rec: RunRecord) -> None:
 # Full-run ingestion (single and batched)
 # --------------------------------------------------------------------------
 
-def ingest_runs(db: Session, payloads: Sequence[RunIn]) -> List[RunRecord]:
+def ingest_runs(db: Session, ws_id: int, payloads: Sequence[RunIn]) -> List[RunRecord]:
     """Batched: one model call for all runs, one for all prefixes. Used by the API and the seeder."""
     engine, policy = _require_ready()
     records: List[RunRecord] = []
@@ -125,9 +126,9 @@ def ingest_runs(db: Session, payloads: Sequence[RunIn]) -> List[RunRecord]:
         run_id = p.run_id or str(uuid.uuid4())
         if db.get(RunRecord, run_id) is not None:
             raise HTTPException(409, f"Run {run_id} already exists")
-        agent = ensure_agent(db, p.agent_id, p.registered_tools, p.model)
+        agent = ensure_agent(db, ws_id, p.agent_id, p.registered_tools, p.model)
         started = p.started_at or utcnow()
-        rec = RunRecord(id=run_id, agent_id=agent.id, task=p.task, model=p.model or agent.model,
+        rec = RunRecord(id=run_id, workspace_id=ws_id, agent_id=agent.id, task=p.task, model=p.model or agent.model,
                         started_at=started, source_label=p.source_label, failure_onset=p.failure_onset)
         t = started
         for i, s in enumerate(p.steps):
@@ -167,34 +168,34 @@ def ingest_runs(db: Session, payloads: Sequence[RunIn]) -> List[RunRecord]:
 # Streaming ingestion
 # --------------------------------------------------------------------------
 
-def start_run(db: Session, p: RunStartIn) -> RunRecord:
+def start_run(db: Session, ws_id: int, p: RunStartIn) -> RunRecord:
     _require_ready()
     run_id = p.run_id or str(uuid.uuid4())
     if db.get(RunRecord, run_id) is not None:
         raise HTTPException(409, f"Run {run_id} already exists")
-    agent = ensure_agent(db, p.agent_id, p.registered_tools, p.model)
-    rec = RunRecord(id=run_id, agent_id=agent.id, task=p.task, model=p.model or agent.model,
+    agent = ensure_agent(db, ws_id, p.agent_id, p.registered_tools, p.model)
+    rec = RunRecord(id=run_id, workspace_id=ws_id, agent_id=agent.id, task=p.task, model=p.model or agent.model,
                     started_at=p.started_at or utcnow(), status="running")
     db.add(rec)
     db.commit()
     return rec
 
 
-def _get_run(db: Session, run_id: str) -> RunRecord:
+def _get_run(db: Session, ws_id: int, run_id: str) -> RunRecord:
     rec = db.get(RunRecord, run_id)
-    if rec is None:
+    if rec is None or rec.workspace_id != ws_id:
         raise HTTPException(404, f"Run {run_id} not found")
     return rec
 
 
-def append_step(db: Session, run_id: str, step: StepIn) -> RunRecord:
+def append_step(db: Session, ws_id: int, run_id: str, step: StepIn) -> RunRecord:
     engine, policy = _require_ready()
-    rec = _get_run(db, run_id)
+    rec = _get_run(db, ws_id, run_id)
     if rec.status != "running":
         raise HTTPException(409, f"Run {run_id} is {rec.status}; cannot append steps")
     rec.steps.append(_step_record(len(rec.steps), step, utcnow()))
     _refresh_totals(rec)
-    agent = db.get(Agent, rec.agent_id)
+    agent = db.get(Agent, (rec.workspace_id, rec.agent_id))
     a = engine.assess(to_ml_run(rec, agent))
     prev_severity = rec.severity if rec.n_steps > 1 else "healthy"
     _apply_assessment(rec, a)
@@ -214,8 +215,8 @@ def append_step(db: Session, run_id: str, step: StepIn) -> RunRecord:
     return rec
 
 
-def finish_run(db: Session, run_id: str) -> RunRecord:
-    rec = _get_run(db, run_id)
+def finish_run(db: Session, ws_id: int, run_id: str) -> RunRecord:
+    rec = _get_run(db, ws_id, run_id)
     if rec.status == "running":
         rec.status = "completed" if rec.has_final_answer else "incomplete"
         rec.ended_at = utcnow()
@@ -228,11 +229,11 @@ def finish_run(db: Session, run_id: str) -> RunRecord:
 # Feedback: closes the loop for both the policy (reward) and the classifier (label)
 # --------------------------------------------------------------------------
 
-def record_feedback(db: Session, run_id: str, fb: FeedbackIn) -> Tuple[Feedback, Optional[float]]:
+def record_feedback(db: Session, ws_id: int, run_id: str, fb: FeedbackIn) -> Tuple[Feedback, Optional[float]]:
     from ml import CLASSES
 
     _, policy = _require_ready()
-    rec = _get_run(db, run_id)
+    rec = _get_run(db, ws_id, run_id)
     if fb.label not in CLASSES:
         raise HTTPException(422, f"label must be one of {CLASSES}")
     action = fb.action_taken or rec.recommended_action

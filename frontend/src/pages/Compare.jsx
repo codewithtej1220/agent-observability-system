@@ -15,7 +15,7 @@ const ROWS = [
   ["Average steps", (a) => fmtNum(a.avg_steps, 1)],
   ["Average tokens", (a) => fmtCompact(a.avg_tokens)],
   ["Average cost", (a) => fmtUsd(a.avg_cost_usd, 3)],
-  ["p95 latency", (a) => `${fmtNum(a.p95_latency_s, 1)} s`],
+  ["p95 latency", (a) => (a.p95_latency_s == null ? "–" : `${fmtNum(a.p95_latency_s, 1)} s`)],
   ["Avoidable spend", (a) => fmtUsd(a.avoidable_cost_usd)],
   ["Median detection step", (a) => (a.median_detection_step == null ? "–" : `Step ${a.median_detection_step + 1}`)],
   ["Top failure", (a) => <FailureTag type={a.top_failure} muted />],

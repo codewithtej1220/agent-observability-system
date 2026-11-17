@@ -1,7 +1,24 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { QueryClient, useQuery } from "@tanstack/react-query";
 
+// Same-origin by default: the dev server and nginx proxy /api to the backend.
 const BASE = import.meta.env.VITE_API_BASE || "";
-const KEY = import.meta.env.VITE_API_KEY || "dev-local-key";
+
+export class ApiError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 10_000,               // revisiting a page shows cached data instantly
+      refetchOnWindowFocus: true,
+      retry: (n, err) => (err?.status === 0 || err?.status >= 500) && n < 2,
+    },
+  },
+});
 
 export async function api(path, { method = "GET", body } = {}) {
   const url = `${BASE}${path}`;
@@ -9,47 +26,41 @@ export async function api(path, { method = "GET", body } = {}) {
   try {
     res = await fetch(url, {
       method,
-      headers: { "X-API-Key": KEY, ...(body ? { "Content-Type": "application/json" } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
+      credentials: "include",
+      headers: { "X-Requested-With": "aobs", ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch {
     // Network-level failure: server down/restarting, wrong host, or blocked by CORS.
-    throw new Error(`Cannot reach the API at ${BASE || window.location.origin}${path.split("?")[0]}`);
+    throw new ApiError(0, `Cannot reach the API at ${BASE || window.location.origin}${path.split("?")[0]}`);
   }
   if (!res.ok) {
     let detail = res.statusText;
     try {
       const j = await res.json();
-      detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+      if (typeof j.detail === "string") detail = j.detail;
+      else if (Array.isArray(j.detail)) {
+        // FastAPI validation errors: "email: value is not a valid email address: …"
+        detail = j.detail.map((e) => `${(e.loc || []).filter((p) => p !== "body").join(".")}: ${e.msg}`).join("; ");
+      } else detail = j.error?.message || detail;
     } catch { /* not JSON */ }
-    throw new Error(`${res.status}: ${detail}`);
+    if (res.status === 401) window.dispatchEvent(new Event("aobs:unauthorized"));
+    if (res.status === 402) window.dispatchEvent(new CustomEvent("aobs:plan-limit", { detail }));
+    throw new ApiError(res.status, detail);
   }
-  return res.json();
+  const data = await res.json();
+  // Any successful change can affect any page: refresh what is on screen.
+  if (method !== "GET") queryClient.invalidateQueries({ queryKey: ["api"] });
+  return data;
 }
 
-/** Fetch `path` (re-fetching when it changes, and every `refreshMs` if set). */
+/** Fetch `path` (cached; re-fetched every `refreshMs` if set). */
 export function useApi(path, { refreshMs = 0 } = {}) {
-  const [state, setState] = useState({ data: null, error: null, loading: true });
-  const current = useRef(path);
-  current.current = path;
-
-  const load = useCallback(async () => {
-    if (!path) return;
-    try {
-      const data = await api(path);
-      if (current.current === path) setState({ data, error: null, loading: false });
-    } catch (error) {
-      if (current.current === path) setState((s) => ({ ...s, error, loading: false }));
-    }
-  }, [path]);
-
-  useEffect(() => {
-    setState((s) => ({ ...s, loading: true }));
-    load();
-    if (!refreshMs) return undefined;
-    const id = setInterval(load, refreshMs);
-    return () => clearInterval(id);
-  }, [load, refreshMs]);
-
-  return { ...state, reload: load };
+  const q = useQuery({
+    queryKey: ["api", path],
+    queryFn: () => api(path),
+    enabled: !!path,
+    refetchInterval: refreshMs || false,
+  });
+  return { data: q.data ?? null, error: q.error, loading: q.isPending && !!path, fetching: q.isFetching, reload: q.refetch };
 }
