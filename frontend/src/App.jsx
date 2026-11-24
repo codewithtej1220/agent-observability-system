@@ -31,6 +31,9 @@ import { LLMCallDetail, LLMCalls } from "./pages/llm/LLMCalls";
 import Contracts from "./pages/llm/Contracts";
 import Alerts from "./pages/llm/Alerts";
 import DriftTests from "./pages/llm/DriftTests";
+import Datasets from "./pages/llm/Datasets";
+import Prompts from "./pages/llm/Prompts";
+import { SessionDetail, Sessions } from "./pages/llm/Sessions";
 import Connect from "./pages/llm/Connect";
 
 const RangeContext = createContext({ hours: 24, setHours: () => {} });
@@ -229,6 +232,10 @@ function Shell() {
               <Route path="/" element={<LLMOverview />} />
               <Route path="/llm/calls" element={<LLMCalls />} />
               <Route path="/llm/calls/:id" element={<LLMCallDetail />} />
+              <Route path="/llm/sessions" element={<Sessions />} />
+              <Route path="/llm/sessions/:id" element={<SessionDetail />} />
+              <Route path="/llm/prompts" element={<Prompts />} />
+              <Route path="/llm/datasets" element={<Datasets />} />
               <Route path="/llm/contracts" element={<Contracts />} />
               <Route path="/llm/alerts" element={<Alerts />} />
               <Route path="/llm/drift" element={<DriftTests />} />

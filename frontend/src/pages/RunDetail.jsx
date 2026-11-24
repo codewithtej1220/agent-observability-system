@@ -5,6 +5,7 @@ import { api, useApi } from "../api";
 import { Async, Card, ChartTip, FailureTag, Legend, Meter, SeverityBadge, Tile } from "../components/ui";
 import { fmtCompact, fmtInt, fmtNum, fmtTime, fmtUsd, humanize } from "../format";
 import { FAILURE_LABEL, axisProps, usePalette } from "../theme";
+import { CallSeverity } from "./llm/common";
 
 export default function RunDetail({ meta }) {
   const { id } = useParams();
@@ -19,6 +20,8 @@ function Body({ r, meta, reload }) {
   const tokens = r.steps.map((s) => ({ step: s.index + 1, input: s.input_tokens, output: s.output_tokens }));
   const probs = Object.entries(r.probabilities || {}).sort((a, b) => b[1] - a[1]);
   const evidence = new Set(r.signals.flatMap((s) => s.evidence_steps));
+  const callsByStep = {};
+  for (const c of r.llm_calls || []) if (c.run_step != null) (callsByStep[c.run_step] ||= []).push(c);
   const warn = meta?.thresholds?.warning ?? 0.35;
   const crit = meta?.thresholds?.critical ?? 0.7;
 
@@ -153,6 +156,7 @@ function Body({ r, meta, reload }) {
                       {s.type === "tool_call" ? <code>{s.tool_name}</code> : <span className="text-2">{s.type === "llm" ? "Reasoning" : "Final answer"}</span>}
                       {s.unregistered && <div><span className="badge critical">Not a registered tool</span></div>}
                       {s.status === "error" && !s.unregistered && <div><span className="badge critical">Error</span></div>}
+                      {callsByStep[s.index] && <div className="small muted">{callsByStep[s.index].length} LLM call{callsByStep[s.index].length > 1 ? "s" : ""}</div>}
                     </td>
                     <td><code className="truncate" style={{ display: "block", maxWidth: 220 }} title={JSON.stringify(s.arguments)}>{Object.keys(s.arguments || {}).length ? JSON.stringify(s.arguments) : ""}</code></td>
                     <td style={{ maxWidth: 360 }}><pre className="output">{s.output}</pre></td>
@@ -165,6 +169,7 @@ function Body({ r, meta, reload }) {
           </div>
         </Card>
         <div className="stack">
+          {r.llm_calls?.length > 0 && <RunCalls calls={r.llm_calls} />}
           <FeedbackForm r={r} meta={meta} onSaved={reload} />
           <Card title="Behavioral features">
             <table>
@@ -181,6 +186,27 @@ function Body({ r, meta, reload }) {
         </div>
       </div>
     </>
+  );
+}
+
+// LLM calls the agent made through the gateway with X-AOBS-Run: the run's trace.
+function RunCalls({ calls }) {
+  return (
+    <Card title="LLM calls in this run" sub="Sent through the gateway with X-AOBS-Run" flush>
+      <table>
+        <thead><tr><th>Step</th><th>Model</th><th>Result</th><th className="r">Cost</th></tr></thead>
+        <tbody>
+          {calls.map((c) => (
+            <tr key={c.id}>
+              <td>{c.run_step == null ? "–" : <span className="pill-step">{c.run_step + 1}</span>}</td>
+              <td className="small"><Link to={`/llm/calls/${c.id}`}>{c.model}</Link><div className="muted truncate" style={{ maxWidth: 180 }}>{c.preview}</div></td>
+              <td><CallSeverity severity={c.severity} /></td>
+              <td className="r small">{fmtUsd(c.cost_usd, 4)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Card>
   );
 }
 

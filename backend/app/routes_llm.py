@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Literal, Optional
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from . import plans
@@ -80,6 +81,7 @@ def call_summary(c: LLMCall, contracts: Dict[int, str]) -> Dict[str, Any]:
         "severity": c.severity, "violations": c.violations, "adherence": c.adherence, "judge_score": c.judge_score,
         "enforcement_action": c.enforcement_action, "failed_checks": failed[:5],
         "preview": (c.last_user or "")[:160], "session_id": c.session_id, "end_user": c.end_user, "tags": c.tags,
+        "run_id": c.run_id, "run_step": c.run_step, "prompt_name": c.prompt_name, "prompt_version": c.prompt_version,
     }
 
 
@@ -183,6 +185,52 @@ def get_call(call_id: str, ctx: Ctx = Depends(require_access), db: Session = Dep
             "feedback": [{"verdict": f.verdict, "note": f.note, "mine": ctx.user is not None and f.user_id == ctx.user.id,
                           "created_at": _iso(f.created_at)}
                          for f in db.query(CallFeedback).filter(CallFeedback.call_id == c.id).order_by(CallFeedback.id)]}
+
+
+# =========================================================================== sessions
+@router.get("/llm/sessions", tags=["llm"])
+def list_sessions(q: Optional[str] = None, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+                  ctx: Ctx = Depends(require_access), db: Session = Depends(get_db)):
+    """Conversations: calls grouped by session id (X-AOBS-Session, or the chat id for web chats), newest first."""
+    crit = func.sum(case((LLMCall.severity == "critical", 1), else_=0))
+    warn = func.sum(case((LLMCall.severity == "warning", 1), else_=0))
+    query = (db.query(LLMCall.session_id, func.count(LLMCall.id), func.min(LLMCall.created_at), func.max(LLMCall.created_at),
+                      func.sum(LLMCall.input_tokens + LLMCall.output_tokens), func.sum(LLMCall.cost_usd), crit, warn,
+                      func.max(LLMCall.end_user), func.max(LLMCall.source))
+             .filter(LLMCall.workspace_id == ctx.workspace_id, LLMCall.session_id != ""))
+    if q:
+        query = query.filter(LLMCall.session_id.ilike(f"%{q}%") | LLMCall.end_user.ilike(f"%{q}%"))
+    query = query.group_by(LLMCall.session_id)
+    total = query.count()
+    rows = query.order_by(func.max(LLMCall.created_at).desc()).offset(offset).limit(limit).all()
+    firsts = {}
+    for sid, _n, first, *_ in rows:  # opening message of each conversation, for the preview
+        c = (db.query(LLMCall.last_user, LLMCall.model).filter(LLMCall.workspace_id == ctx.workspace_id,
+             LLMCall.session_id == sid, LLMCall.created_at == first).first())
+        firsts[sid] = c
+    items = [{"session_id": sid, "calls": n, "started_at": _iso(first), "last_at": _iso(last), "tokens": int(tok or 0),
+              "cost_usd": round(cost or 0, 6), "critical": int(cr or 0), "warning": int(wa or 0), "end_user": user,
+              "source": src, "preview": ((firsts[sid].last_user if firsts[sid] else "") or "")[:160],
+              "model": firsts[sid].model if firsts[sid] else ""}
+             for sid, n, first, last, tok, cost, cr, wa, user, src in rows]
+    return {"total": total, "items": items}
+
+
+@router.get("/llm/sessions/{session_id}", tags=["llm"])
+def get_session(session_id: str, ctx: Ctx = Depends(require_access), db: Session = Depends(get_db)):
+    """One conversation in order, with each prompt, answer and check result."""
+    calls = (db.query(LLMCall).filter(LLMCall.workspace_id == ctx.workspace_id, LLMCall.session_id == session_id)
+             .order_by(LLMCall.created_at).limit(500).all())
+    if not calls:
+        raise HTTPException(404, "Session not found")
+    names = _contract_names(db, ctx.workspace_id)
+    return {"session_id": session_id, "calls": [{**call_summary(c, names), "last_user": c.last_user,
+                                                  "response_text": c.response_text, "content_stored": c.content_stored}
+                                                 for c in calls],
+            "totals": {"calls": len(calls), "tokens": sum(c.input_tokens + c.output_tokens for c in calls),
+                       "cost_usd": round(sum(c.cost_usd for c in calls), 6),
+                       "critical": sum(c.severity == "critical" for c in calls),
+                       "warning": sum(c.severity == "warning" for c in calls)}}
 
 
 class FeedbackIn(BaseModel):

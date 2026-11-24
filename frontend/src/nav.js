@@ -1,6 +1,6 @@
 import {
   Activity, BellRing, Bot, BrainCircuit, ClipboardCheck, FileCheck2, GaugeCircle, Info, LayoutDashboard,
-  CreditCard, ListTree, PlugZap, Settings, ShieldCheck, Sparkles, Waves,
+  CreditCard, Database, ListTree, MessagesSquare, PlugZap, ScrollText, Settings, ShieldCheck, Sparkles, Waves,
 } from "lucide-react";
 
 // Single source of truth for navigation: sidebar, breadcrumbs and the command palette.
@@ -10,8 +10,11 @@ export const NAV = [
     items: [
       { to: "/", label: "Overview", icon: LayoutDashboard, end: true, keywords: "dashboard home adherence" },
       { to: "/llm/calls", label: "Live calls", icon: Activity, keywords: "log requests prompts responses" },
+      { to: "/llm/sessions", label: "Sessions", icon: MessagesSquare, keywords: "conversations threads users chat history" },
       { to: "/llm/contracts", label: "Prompt contracts", icon: FileCheck2, keywords: "rules policy enforce block repair" },
       { to: "/llm/alerts", label: "Alerts", icon: BellRing, badge: "alerts", keywords: "notifications slack" },
+      { to: "/llm/prompts", label: "Prompts", icon: ScrollText, keywords: "prompt management versions labels production" },
+      { to: "/llm/datasets", label: "Datasets & experiments", icon: Database, keywords: "evals test cases benchmark compare" },
       { to: "/llm/drift", label: "Drift tests", icon: Waves, keywords: "baseline schedule" },
       { to: "/llm/connect", label: "Connect LLMs", icon: PlugZap, keywords: "setup gateway sdk extension gemini chatgpt claude" },
     ],

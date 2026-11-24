@@ -22,10 +22,13 @@ from .auth import Ctx, require_access, role
 from .config import get_settings
 from .db import get_db
 from .orm import Agent, ModelVersion, RunRecord
+from .orm_llm import LLMCall
 from .realtime import broker
+from .routes_llm import _contract_names, call_summary
 from .schemas import AgentIn, AssessmentOut, FeedbackIn, RunIn, RunStartIn, StepIn
 from .services import analytics, ingest, training
 from .services.registry import registry
+
 
 router = APIRouter(prefix="/api")
 member = role("member")
@@ -136,6 +139,11 @@ def get_run(run_id: str, ctx: Ctx = Depends(require_access), db: Session = Depen
         raise HTTPException(404, "Run not found")
     d["correction"] = build_correction(d.get("failure_type"), d.get("signals") or [], d.get("recommended_action") or "",
                                        (d.get("agent") or {}).get("registered_tools"))
+    # LLM calls the agent made through the gateway with X-AOBS-Run, in order (the run's trace).
+    calls = (db.query(LLMCall).filter(LLMCall.workspace_id == ctx.workspace_id, LLMCall.run_id == run_id)
+             .order_by(LLMCall.created_at).limit(500).all())
+    names = _contract_names(db, ctx.workspace_id) if calls else {}
+    d["llm_calls"] = [call_summary(c, names) for c in calls]
     return d
 
 

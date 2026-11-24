@@ -76,7 +76,7 @@ export function LLMCalls() {
         <label className="field">Source
           <select value={params.get("source") || "apps"} onChange={(e) => set("source", e.target.value)}>
             <option value="apps">Apps and chat sites</option><option value="gateway">Your apps (gateway)</option>
-            <option value="browser">Chat sites (extension)</option><option value="drift_test">Drift tests</option><option value="all">All</option>
+            <option value="browser">Chat sites (extension)</option><option value="drift_test">Drift tests</option><option value="experiment">Experiments</option><option value="all">All</option>
           </select>
         </label>
       </div>
@@ -109,7 +109,7 @@ export function LLMCalls() {
                   </tbody>
                 </table>
               </div>
-              <Pager total={d.total} limit={LIMIT} offset={offset} onChange={(o) => set("offset", o)} />
+              <Pager total={d.total} limit={LIMIT} offset={offset} noun="calls" onChange={(o) => set("offset", o)} />
             </>
           )}
         </Async>
@@ -122,6 +122,24 @@ export function LLMCallDetail() {
   const { id } = useParams();
   const state = useApi(`/api/llm/calls/${id}`);
   return <Async state={state}>{(c) => <CallBody c={c} />}</Async>;
+}
+
+// Save a real call as a test case: its prompt becomes the input and its answer the expected output.
+function AddToDataset({ c }) {
+  const { can } = useAuth();
+  const datasets = useApi(can("member") && c.content_stored && c.last_user ? "/api/llm/datasets" : null);
+  if (!datasets.data?.length) return null;
+  return (
+    <select aria-label="Add this call to a dataset" value="" onChange={async (e) => {
+      try {
+        await api(`/api/llm/datasets/${e.target.value}/items/from-call`, { method: "POST", body: { call_id: c.id } });
+        toast.success("Added to dataset");
+      } catch (err) { toast.error(err.message); }
+    }}>
+      <option value="">Add to dataset…</option>
+      {datasets.data.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+    </select>
+  );
 }
 
 // Built-in checks run on every successful call; only failures are stored, so passes are shown here.
@@ -144,9 +162,12 @@ function CallBody({ c }) {
           <div className="small muted"><Link to="/llm/calls">LLM calls</Link> / <span className="mono">{c.id}</span></div>
           <h1 style={{ marginTop: 4 }}>{c.model}</h1>
           <p>{PROVIDER_LABEL[c.provider]} · {fmtTime(c.created_at)} · {c.endpoint}{c.contract ? ` · contract ${c.contract}` : ""}
-            {c.session_id ? ` · session ${c.session_id}` : ""}{c.end_user ? ` · user ${c.end_user}` : ""}</p>
+            {c.session_id && <> · <Link to={`/llm/sessions/${encodeURIComponent(c.session_id)}`}>session {c.session_id.slice(0, 16)}</Link></>}
+            {c.end_user ? ` · user ${c.end_user}` : ""}
+            {c.run_id && <> · <Link to={`/runs/${c.run_id}`}>agent run{c.run_step != null ? `, step ${c.run_step + 1}` : ""}</Link></>}
+            {c.prompt_name && <> · <Link to={`/llm/prompts?name=${encodeURIComponent(c.prompt_name)}`}>prompt {c.prompt_name}{c.prompt_version ? ` v${c.prompt_version}` : ""}</Link></>}</p>
         </div>
-        <div className="row"><EnforcementBadge action={c.enforcement_action} /><CallSeverity severity={c.severity} /></div>
+        <div className="row"><AddToDataset c={c} /><EnforcementBadge action={c.enforcement_action} /><CallSeverity severity={c.severity} /></div>
       </div>
       <div className="tiles">
         <Tile label="Status" value={c.status_code} delta={c.finish_reason ? `finish: ${c.finish_reason}` : ""} />

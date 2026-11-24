@@ -16,6 +16,6 @@
                 messages.append(REFLECTION_PROMPT)
         run.final_answer(answer)
 """
-from .client import Assessment, LiveRun, ObservabilityClient, ObservabilityError
+from .client import Assessment, LiveRun, ManagedPrompt, ObservabilityClient, ObservabilityError
 
-__all__ = ["ObservabilityClient", "LiveRun", "Assessment", "ObservabilityError"]
+__all__ = ["ObservabilityClient", "LiveRun", "ManagedPrompt", "Assessment", "ObservabilityError"]

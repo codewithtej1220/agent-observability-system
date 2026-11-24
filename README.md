@@ -48,6 +48,10 @@ flowchart LR
 - **Enforcement** - Monitor, block (HTTP 422) or repair (re-ask the model, then fall back to another model)
 - **Alerts** - Per-call (PII leak, prompt injection, blocked) and windowed (violation rate, errors, latency, cost) via in-app, Slack, webhook, email
 - **Drift Tests** - Fixed prompts on a schedule, compared with a baseline, to catch provider-side model changes
+- **Sessions** - Calls grouped into whole conversations, from your apps and from web chats
+- **Trace Linking** - See which LLM calls each step of an agent run made
+- **Prompt Management** - Versioned prompts with labels such as `production`, and per-version usage and issues
+- **Datasets & Experiments** - Test sets (including cases copied from real calls) run against a model and prompt version, scored by your checks
 - **Accounts & Workspaces** - Email/password and Google sign-in, roles (admin/member/viewer), per-workspace API keys, provider keys encrypted at rest
 - **Real-time Detection** - Catches failures as they happen, not after
 - **Multi-Layer ML** - Rules + Unsupervised + Supervised models working together
@@ -240,7 +244,8 @@ gemini = genai.Client(api_key="aobs_...", http_options=types.HttpOptions(base_ur
 
 Requests and responses (including streams) are forwarded unchanged; the gateway observes them.
 Optional headers, stripped before forwarding: `X-AOBS-Project` (contract), `X-AOBS-Session`
-(conversation id), `X-AOBS-User`, `X-AOBS-Tags`, `X-AOBS-Credential` (non-default stored key).
+(conversation id), `X-AOBS-User`, `X-AOBS-Tags`, `X-AOBS-Credential` (non-default stored key),
+`X-AOBS-Run` and `X-AOBS-Step` (link the call to an agent run step), `X-AOBS-Prompt` (managed prompt, `name@version`).
 
 **Prompt contracts** (dashboard → Prompt contracts) define what a project's responses must do:
 
@@ -306,6 +311,44 @@ The client fails open: if the service is unreachable, the agent keeps running.
 In development, `dev-local-key` also works and maps to the Main workspace (disabled when
 `AOBS_ENVIRONMENT=production` and in Docker Compose).
 
+## Sessions, traces, prompts and experiments
+
+**Sessions** (dashboard → Sessions) group every call that shares a session id: the `X-AOBS-Session`
+header for your apps, or the chat for web chats. Each session opens as the whole conversation in
+order, with each answer's check results.
+
+**Trace linking.** LLM calls an agent makes through the gateway can carry the run and step they
+belong to. The run's page then lists those calls under their steps, and each call links back:
+
+```python
+with client.run("support-bot", task=user_message) as run:
+    resp = openai_client.chat.completions.create(model="gpt-4o-mini", messages=messages,
+                                                 extra_headers=run.gateway_headers())
+    run.reasoning(resp.choices[0].message.content)
+```
+
+**Prompt management** (dashboard → Prompts). Each save creates a new, unchangeable version; labels
+such as `production` or `staging` point at one version and can be moved ("Promote to production").
+Apps fetch the version to use and send its name and version with each call, so the Prompts page
+shows calls, critical issues and cost per version:
+
+```python
+prompt = client.get_prompt("support-reply")            # "production" label, else the newest version
+messages = [{"role": "system", "content": prompt.system_prompt},
+            {"role": "user", "content": prompt.compile(input=user_message)}]   # fills {{input}}
+resp = openai_client.chat.completions.create(model="gpt-4o-mini", messages=messages,
+                                             extra_headers=prompt.headers)     # X-AOBS-Prompt: support-reply@3
+```
+
+**Datasets and experiments** (dashboard → Datasets & experiments). A dataset is a list of test
+cases: an input and, optionally, the expected answer. Write them by hand, or use **Add to dataset**
+on any call's page to turn a real conversation into a test case. An experiment sends every item
+(up to 200) to a model, optionally through a prompt version (its template's `{{input}}` is filled
+from the item), and scores each answer with the built-in checks and a contract you pick, plus its
+similarity to the expected answer. Experiments sit side by side, so you can compare a new model or
+prompt version before shipping it. Each item is a real, billed provider call; experiment calls are
+kept out of the live feed (Source filter → Experiments).
+
 ## Detection and correction
 
 Detection runs on every call and every agent step; correction depends on what failed:
@@ -370,6 +413,13 @@ result is scoped to that workspace. Viewers are read-only.
 | GET | `/api/llm/overview`, `/api/llm/calls`, `/api/llm/calls/{id}` | Adherence dashboard and call log |
 | CRUD | `/api/llm/contracts`, `/api/llm/alert-rules`, `/api/llm/drift-tests` | Contracts, alert rules, drift tests |
 | GET/PATCH | `/api/llm/alerts` | Alert events (acknowledge / resolve) |
+| GET | `/api/llm/sessions`, `/api/llm/sessions/{id}` | Conversations grouped by session id |
+| GET/POST | `/api/llm/prompts`, `/api/llm/prompts/{name}` | Prompt versions (each POST creates a new version) |
+| GET | `/api/llm/prompts/{name}/resolve?label=&version=` | The version an app should use |
+| PUT | `/api/llm/prompts/{name}/versions/{v}/labels` | Move labels such as `production` |
+| CRUD | `/api/llm/datasets`, `/api/llm/datasets/{id}/items` | Datasets and test cases |
+| POST | `/api/llm/datasets/{id}/items/from-call` | Turn a real call into a test case |
+| POST/GET | `/api/llm/datasets/{id}/experiments`, `/api/llm/experiments/{id}` | Run an experiment; results per item |
 | POST | `/api/ingest/runs/start` | Open a live run |
 | POST | `/api/ingest/runs/{id}/steps` | Append a step; returns risk, failure type, evidence, recommended action |
 | POST | `/api/ingest/runs/{id}/finish` | Close a live run |
@@ -401,11 +451,14 @@ Built with React, TanStack Query (cached, auto-refreshing data), Radix UI (acces
 
 ### LLM monitoring
 - **Overview** - calls by outcome, violation rate, adherence per model, most-violated checks, spend, latency
-- **Live calls** - auto-refreshing call log with filters; detail shows prompt, response, every check and its reason, enforcement attempts
+- **Live calls** - auto-refreshing call log with filters; detail shows prompt, response, every check and its reason, enforcement attempts, and links to its session, agent run and prompt version
+- **Sessions** - conversations in order, with tokens, cost and issues per conversation
+- **Prompts** - prompt versions, labels, and calls / critical issues / cost per version
+- **Datasets & experiments** - test cases and experiment results compared side by side
 - **Prompt contracts** - rule builder, monitor/block/repair modes, fallback models, dry-run tester
 - **Alerts** - open/acknowledged/resolved events and rule management with test notifications
 - **Drift tests** - scheduled baseline comparisons with a similarity trend
-- **Connect LLMs** - setup status and SDK snippets (Python, JavaScript, LangChain, curl)
+- **Connect LLMs** - setup status, SDK snippets (Python, JavaScript, LangChain, curl), and how to send sessions, traces and prompt versions
 - **Settings** - workspace, members and roles, API keys, provider keys, privacy (content storage, PII masking, retention), LLM judge
 
 ### Overview Page
@@ -423,6 +476,7 @@ Built with React, TanStack Query (cached, auto-refreshing data), Radix UI (acces
 - Class probabilities from the ML model
 - Policy's per-action confidence scores
 - Full trace with timing information
+- **LLM calls in this run**: gateway calls sent with `X-AOBS-Run`, under the step that made them
 - **Review form** for human feedback
 
 ### Agents & Comparison
@@ -475,7 +529,8 @@ backend/
     crypto.py      # Encryption of stored provider keys
     routes.py      # Agent-monitoring endpoints
     routes_account.py  # Sign-up/login, Google, workspaces, members, keys
-    routes_llm.py  # LLM monitoring endpoints
+    routes_llm.py  # LLM monitoring endpoints (calls, sessions, contracts, alerts, drift)
+    routes_studio.py  # Prompt management, datasets and experiments
     pricing.py     # Token cost estimation
     llm/           # LLM monitoring
       gateway.py   # Observing/enforcing proxy for OpenAI, Anthropic, Gemini
@@ -486,7 +541,7 @@ backend/
       alerts.py    # Alert rules, events, Slack/webhook/email delivery
       drift.py     # Scheduled drift tests
       worker.py    # Background loop: window alerts, drift tests, retention
-      demo.py      # Simulated LLM traffic for the demo workspace
+      experiments.py  # Runs dataset items against a model and scores them
     services/      # Business logic
       ingest.py    # Real-time ingestion
       analytics.py # Dashboard queries

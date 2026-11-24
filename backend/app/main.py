@@ -24,6 +24,7 @@ from .realtime import broker
 from .routes_account import router as account_router
 from .routes_billing import router as billing_router
 from .routes_llm import router as llm_router
+from .routes_studio import router as studio_router
 from .services.registry import registry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -83,6 +84,7 @@ app.include_router(account_router)
 app.include_router(billing_router)
 app.include_router(router)
 app.include_router(llm_router)
+app.include_router(studio_router)
 app.include_router(gateway_router)
 
 
