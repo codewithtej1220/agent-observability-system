@@ -218,12 +218,12 @@ export const RANGES = [
   { value: 168, label: "7d" },
 ];
 
-export function Pager({ total, limit, offset, onChange }) {
+export function Pager({ total, limit, offset, onChange, noun = "runs" }) {
   const page = Math.floor(offset / limit) + 1;
   const pages = Math.max(1, Math.ceil(total / limit));
   return (
     <div className="spread small" style={{ padding: "10px 16px" }}>
-      <span className="muted">{total.toLocaleString()} runs</span>
+      <span className="muted">{total.toLocaleString()} {noun}</span>
       <div className="row">
         <button disabled={page <= 1} onClick={() => onChange(offset - limit)}>Previous</button>
         <span className="num">Page {page} of {pages}</span>

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -86,6 +87,13 @@ class ObservabilityClient:
             "description": description, "registered_tools": tools,
         })
 
+    # -- prompts ---------------------------------------------------------
+    def get_prompt(self, name: str, label: Optional[str] = None, version: Optional[int] = None) -> "ManagedPrompt":
+        """Fetch a managed prompt: a version, a label, else the "production" label, else the newest."""
+        q = urllib.parse.urlencode({k: v for k, v in (("label", label), ("version", version)) if v is not None})
+        d = self._request("GET", f"/api/llm/prompts/{urllib.parse.quote(name)}/resolve" + (f"?{q}" if q else ""))
+        return ManagedPrompt(d)
+
     # -- runs ------------------------------------------------------------
     def run(self, agent_id: str, task: str = "", model: str = "", run_id: Optional[str] = None) -> "LiveRun":
         return LiveRun(self, agent_id, task, model, run_id)
@@ -102,6 +110,26 @@ class ObservabilityClient:
         })
 
 
+class ManagedPrompt:
+    """A prompt version from prompt management. Send `headers` with your gateway call to record which version ran."""
+
+    def __init__(self, d: Dict[str, Any]):
+        self.name, self.version = d["name"], d["version"]
+        self.system_prompt, self.template = d.get("system_prompt", ""), d.get("template", "")
+        self.model, self.config, self.labels = d.get("model", ""), d.get("config") or {}, d.get("labels") or []
+
+    def compile(self, **variables: Any) -> str:
+        """The template with {{name}} placeholders filled."""
+        text = self.template
+        for k, v in variables.items():
+            text = text.replace("{{" + k + "}}", str(v))
+        return text
+
+    @property
+    def headers(self) -> Dict[str, str]:
+        return {"X-AOBS-Prompt": f"{self.name}@{self.version}"}
+
+
 class LiveRun:
     """A run streamed step by step. Use as a context manager."""
 
@@ -113,6 +141,7 @@ class LiveRun:
         self.run_id = run_id
         self.last: Optional[Assessment] = None
         self._disabled = False
+        self.steps = 0
 
     def __enter__(self) -> "LiveRun":
         try:
@@ -139,11 +168,19 @@ class LiveRun:
             return None
         try:
             self.last = Assessment.from_json(self.client._request("POST", f"/api/ingest/runs/{self.run_id}/steps", step))
+            self.steps += 1
             return self.last
         except ObservabilityError:
             if not self.client.fail_open:
                 raise
             return None
+
+    def gateway_headers(self) -> Dict[str, str]:
+        """Headers for LLM calls made through the gateway during this run: links them to the run and to the
+        step about to be logged, so the run's page shows which LLM calls each step made."""
+        if self._disabled or not self.run_id:
+            return {}
+        return {"X-AOBS-Run": self.run_id, "X-AOBS-Step": str(self.steps)}
 
     def tool_call(self, tool_name: str, arguments: Dict[str, Any], output: str, error: bool = False,
                   latency_ms: Optional[float] = None, input_tokens: int = 0, output_tokens: int = 0,

@@ -15,7 +15,8 @@ function Code({ text }) {
   );
 }
 
-const snippets = (u, project) => {
+const snippets = (u, project, api) => {
+  u = { ...u, api };
   const hdr = project ? project : "my-project";
   return {
     "OpenAI · Python": `from openai import OpenAI
@@ -86,6 +87,25 @@ gpt = ChatOpenAI(model="gpt-4o-mini", base_url="${u.openai}", api_key="AOBS_API_
                  default_headers={"X-AOBS-Project": "${hdr}"})
 claude = ChatAnthropic(model="claude-sonnet-4-5", base_url="${u.anthropic}", api_key="AOBS_API_KEY",
                        default_headers={"X-AOBS-Project": "${hdr}"})`,
+    "Sessions, traces & prompts": `from openai import OpenAI
+from agent_observability import ObservabilityClient
+
+aobs = ObservabilityClient("${u.api}", api_key="AOBS_API_KEY")
+llm = OpenAI(base_url="${u.openai}", api_key="AOBS_API_KEY")
+
+# Prompt management: use the version labeled "production" and record it on every call
+prompt = aobs.get_prompt("support-reply")
+messages = [{"role": "system", "content": prompt.system_prompt},
+            {"role": "user", "content": prompt.compile(input="Where is my order?")}]
+
+# Trace linking: calls made during an agent run appear under its steps
+with aobs.run("support-bot", task="Where is my order?") as run:
+    resp = llm.chat.completions.create(
+        model="gpt-4o-mini", messages=messages,
+        extra_headers={**prompt.headers, **run.gateway_headers(),
+                       "X-AOBS-Session": "conversation-123"},  # Sessions: group one conversation
+    )
+    run.final_answer(resp.choices[0].message.content)`,
     curl: `curl ${u.openai}/chat/completions \\
   -H "Authorization: Bearer $AOBS_API_KEY" \\
   -H "Content-Type: application/json" \\
@@ -101,7 +121,7 @@ export default function Connect() {
   return (
     <Async state={info}>
       {(d) => {
-        const sn = snippets(d.base_urls, d.contracts[0]);
+        const sn = snippets(d.base_urls, d.contracts[0], d.api_url);
         const hasKey = (keys.data || []).some((k) => !k.revoked);
         const anyCred = Object.values(d.credentials).some(Boolean);
         return (
@@ -166,10 +186,13 @@ export default function Connect() {
                 <table>
                   <tbody>
                     <tr><td className="mono small">X-AOBS-Project</td><td className="small">Contract slug: which rules apply and whether to monitor, block or repair. <Link to="/llm/contracts">Contracts</Link></td></tr>
-                    <tr><td className="mono small">X-AOBS-Session</td><td className="small">Conversation id, to group the calls of one chat</td></tr>
+                    <tr><td className="mono small">X-AOBS-Session</td><td className="small">Conversation id, to group the calls of one chat. <Link to="/llm/sessions">Sessions</Link></td></tr>
                     <tr><td className="mono small">X-AOBS-User</td><td className="small">Your end-user's id</td></tr>
                     <tr><td className="mono small">X-AOBS-Tags</td><td className="small">Comma-separated labels (e.g. <code>web,beta</code>)</td></tr>
                     <tr><td className="mono small">X-AOBS-Credential</td><td className="small">Name of a stored provider key other than the default</td></tr>
+                    <tr><td className="mono small">X-AOBS-Run</td><td className="small">Agent run id: the call appears on that run's page. <Link to="/runs">Runs</Link></td></tr>
+                    <tr><td className="mono small">X-AOBS-Step</td><td className="small">Index of the run step the call belongs to (the SDK's <code>run.gateway_headers()</code> sets both)</td></tr>
+                    <tr><td className="mono small">X-AOBS-Prompt</td><td className="small">Managed prompt used, as <code>name@version</code> (the SDK's <code>prompt.headers</code>). <Link to="/llm/prompts">Prompts</Link></td></tr>
                   </tbody>
                 </table>
               </Card>

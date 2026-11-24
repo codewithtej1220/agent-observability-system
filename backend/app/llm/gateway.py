@@ -15,6 +15,9 @@ forwarding:
     X-AOBS-User         your end-user's id
     X-AOBS-Tags         comma-separated labels
     X-AOBS-Credential   name of a stored credential other than the default
+    X-AOBS-Run          agent run id, to link this call to an agent run (trace)
+    X-AOBS-Step         index of the run step this call belongs to
+    X-AOBS-Prompt       managed prompt used, as name@version
 
 Modes (set on the contract):
     monitor  responses pass through untouched and are evaluated afterwards
@@ -75,6 +78,24 @@ class CallMeta:
     session_id: str = ""
     end_user: str = ""
     tags: List[str] = field(default_factory=list)
+    run_id: Optional[str] = None
+    run_step: Optional[int] = None
+    prompt_name: str = ""
+    prompt_version: Optional[int] = None
+
+
+def _int_or_none(value: Optional[str]) -> Optional[int]:
+    try:
+        return int(value) if value not in (None, "") else None
+    except ValueError:
+        return None
+
+
+def trace_fields(headers) -> Dict:
+    """Run/step/prompt metadata from X-AOBS-* headers; malformed values are ignored, never rejected."""
+    name, _, version = (headers.get("x-aobs-prompt") or "").partition("@")
+    return {"run_id": (headers.get("x-aobs-run") or "")[:64] or None, "run_step": _int_or_none(headers.get("x-aobs-step")),
+            "prompt_name": name.strip()[:120], "prompt_version": _int_or_none(version)}
 
 
 @dataclass
@@ -144,6 +165,7 @@ async def finalize(meta: CallMeta, out: Outcome) -> None:
             id=meta.call_id, workspace_id=meta.workspace_id, provider=meta.provider, model=out.model,
             endpoint=meta.path, contract_id=meta.contract_id, credential_id=meta.credential_id,
             session_id=meta.session_id, end_user=meta.end_user, tags=meta.tags,
+            run_id=meta.run_id, run_step=meta.run_step, prompt_name=meta.prompt_name, prompt_version=meta.prompt_version,
             status_code=out.status_code, error=out.error[:2000], streamed=out.streamed,
             latency_ms=round(out.latency_ms, 1), ttft_ms=round(out.ttft_ms, 1) if out.ttft_ms else None,
             system_prompt=keep(p.system), last_user=keep(p.last_user), n_messages=len(p.messages),
@@ -265,6 +287,7 @@ async def proxy(provider: str, path: str, request: Request):
             session_id=(request.headers.get("x-aobs-session") or "")[:200],
             end_user=(request.headers.get("x-aobs-user") or "")[:200],
             tags=[t.strip() for t in (request.headers.get("x-aobs-tags") or "").split(",") if t.strip()][:20],
+            **trace_fields(request.headers),
         )
         t0 = time.perf_counter()
         try:

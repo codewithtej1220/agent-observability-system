@@ -42,6 +42,7 @@ class LLMCall(Base):
     __table_args__ = (
         Index("ix_llm_ws_created", "workspace_id", "created_at"),
         Index("ix_llm_ws_model_created", "workspace_id", "model", "created_at"),
+        Index("ix_llm_ws_session", "workspace_id", "session_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -56,6 +57,11 @@ class LLMCall(Base):
     session_id: Mapped[str] = mapped_column(String(200), default="")
     end_user: Mapped[str] = mapped_column(String(200), default="")
     tags: Mapped[list] = mapped_column(JSON, default=list)
+    # Trace linking (X-AOBS-Run / X-AOBS-Step) and prompt version (X-AOBS-Prompt: name@version)
+    run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    run_step: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    prompt_name: Mapped[str] = mapped_column(String(120), default="", server_default="")
+    prompt_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     status_code: Mapped[int] = mapped_column(Integer, default=200)
     error: Mapped[str] = mapped_column(Text, default="")
@@ -186,3 +192,85 @@ class CallFeedback(Base):
     verdict: Mapped[str] = mapped_column(String(20))  # correct | false_positive | missed
     note: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Prompt(Base):
+    """One version of a managed prompt. Versions are immutable; labels (e.g. "production") move between them."""
+
+    __tablename__ = "prompts"
+    __table_args__ = (UniqueConstraint("workspace_id", "name", "version"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    version: Mapped[int] = mapped_column(Integer)
+    system_prompt: Mapped[str] = mapped_column(Text, default="")
+    template: Mapped[str] = mapped_column(Text, default="")  # user message; {{variables}} filled by the app
+    model: Mapped[str] = mapped_column(String(120), default="")
+    config: Mapped[dict] = mapped_column(JSON, default=dict)  # e.g. temperature, max_tokens
+    labels: Mapped[list] = mapped_column(JSON, default=list)
+    commit_message: Mapped[str] = mapped_column(String(500), default="")
+    created_by: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Dataset(Base):
+    __tablename__ = "datasets"
+    __table_args__ = (UniqueConstraint("workspace_id", "name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class DatasetItem(Base):
+    __tablename__ = "dataset_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dataset_id: Mapped[int] = mapped_column(ForeignKey("datasets.id", ondelete="CASCADE"), index=True)
+    system_prompt: Mapped[str] = mapped_column(Text, default="")
+    input: Mapped[str] = mapped_column(Text)
+    expected: Mapped[str] = mapped_column(Text, default="")
+    source_call_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Experiment(Base):
+    """One run of a dataset against a model (and optionally a prompt version), scored by a contract."""
+
+    __tablename__ = "experiments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    dataset_id: Mapped[int] = mapped_column(ForeignKey("datasets.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    provider: Mapped[str] = mapped_column(String(20))
+    model: Mapped[str] = mapped_column(String(120))
+    credential_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    prompt_name: Mapped[str] = mapped_column(String(120), default="")
+    prompt_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    contract_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="running")  # running | done | error
+    detail: Mapped[str] = mapped_column(Text, default="")
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class ExperimentResult(Base):
+    __tablename__ = "experiment_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    experiment_id: Mapped[int] = mapped_column(ForeignKey("experiments.id", ondelete="CASCADE"), index=True)
+    item_id: Mapped[int] = mapped_column(Integer)
+    call_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    status: Mapped[str] = mapped_column(String(10), default="ok")  # ok | error
+    output: Mapped[str] = mapped_column(Text, default="")
+    passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    violations: Mapped[int] = mapped_column(Integer, default=0)
+    similarity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # vs. expected, when given
+    latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    detail: Mapped[str] = mapped_column(Text, default="")
